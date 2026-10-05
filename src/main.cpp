@@ -9,12 +9,15 @@
 #include <cmath>
 #include <cwctype>
 #include <fstream>
+#include <cstring>
 #include "AppTypes.h"
 #include "Direct2DContext.h"
 #include "UIComponents.h"
 #include "AppController.h"
 #include "AppIdentity.h"
 #include "NewItemDialog.h"
+#include "SettingsDialog.h"
+#include "ChatCopy.h"
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -32,6 +35,11 @@ namespace
     WNDPROC g_originalEditProc = nullptr;
     HBRUSH g_editBackgroundBrush = nullptr;
     HFONT g_editFont = nullptr;
+    float g_editChatFontSize = 0;
+    std::wstring g_copyFeedback;
+    bool g_copyFeedbackError = false;
+    ULONGLONG g_copyFeedbackUntil = 0;
+    DWORD g_lastCopyClipboardSequence = 0;
 
     std::unique_ptr<Lattice::Direct2DContext> g_d2dContext;
     std::unique_ptr<Lattice::AppController> g_controller;
@@ -44,8 +52,11 @@ namespace
     float g_dpi = 96.0f;
     bool g_dragSidebar = false;
     bool g_dragConversation = false;
+    bool g_dragDropdown = false;
     float g_dragAnchor = 0.0f;
     int g_dropdownIndex = 0;
+    float g_dropdownScrollOffset = 0.0f;
+    Lattice::ActiveDropdown g_layoutDropdown = Lattice::ActiveDropdown::None;
     HWND g_findDialog = nullptr;
     UINT g_findMessage = 0;
     FINDREPLACEW g_find{};
@@ -58,7 +69,7 @@ namespace
     enum Command : WORD { NewSessionCommand = 4001, OpenSessionCommand, SaveSessionCommand,
         CloseSessionCommand, NewProjectCommand, CloseProjectCommand, SearchCommand,
         ProjectMenuCommand, SessionMenuCommand, FocusComposerCommand, FilesCommand,
-        SessionControlsCommand, PluginsCommand, FindNextCommand };
+        SessionControlsCommand, PluginsCommand, FindNextCommand, CopyChatCommand };
 
     float Scale() { return g_dpi / 96.0f; }
     bool Contains(const D2D1_RECT_F& r, float x, float y)
@@ -96,7 +107,8 @@ namespace
     }
     void UpdateEditFont()
     {
-        HFONT replacement = CreateFontW(-static_cast<int>(std::lround(12.0f * Scale())),
+        const float size = g_controller ? g_controller->GetChatFontSize() : 11.5f;
+        HFONT replacement = CreateFontW(-static_cast<int>(std::lround(size * Scale())),
             0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -104,6 +116,36 @@ namespace
         if (g_editControl) SendMessageW(g_editControl, WM_SETFONT, reinterpret_cast<WPARAM>(replacement), TRUE);
         if (g_editFont) DeleteObject(g_editFont);
         g_editFont = replacement;
+        g_editChatFontSize = size;
+    }
+    bool WriteClipboardText(const std::wstring& text, std::wstring& error)
+    {
+        const auto bytes = (text.size() + 1) * sizeof(wchar_t);
+        const HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (!memory) { error = L"Copy failed: Windows could not allocate clipboard memory."; return false; }
+        void* data = GlobalLock(memory);
+        if (!data) { GlobalFree(memory); error = L"Copy failed: clipboard memory is unavailable."; return false; }
+        memcpy(data, text.c_str(), bytes); GlobalUnlock(memory);
+        if (!OpenClipboard(g_mainWindow))
+        { GlobalFree(memory); error = L"Clipboard is busy. Try Copy again."; return false; }
+        const bool written = EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, memory);
+        if (written) g_lastCopyClipboardSequence = GetClipboardSequenceNumber();
+        else { GlobalFree(memory); error = L"Copy failed: Windows could not update the clipboard."; }
+        CloseClipboard(); return written;
+    }
+    void CopyChatText(int messageIndex = -1)
+    {
+        const auto* session = g_controller ? ActiveSessionFor(*g_controller) : nullptr;
+        Lattice::ChatCopy::Result result;
+        if (!session) result.error = L"No chat messages to copy.";
+        else if (messageIndex < 0) result = Lattice::ChatCopy::Transcript(*session);
+        else if (messageIndex < static_cast<int>(session->messages.size())) result = Lattice::ChatCopy::Message(session->messages[messageIndex]);
+        else result.error = L"This message is no longer available.";
+        const bool copied = result.success && WriteClipboardText(result.text, result.error);
+        g_copyFeedback = copied ? (messageIndex < 0 ? L"Chat copied" : L"Message copied") :
+            (result.error.empty() ? L"No chat messages to copy." : result.error);
+        g_copyFeedbackError = !copied; g_copyFeedbackUntil = GetTickCount64() + (copied ? 3000 : 5000);
+        if (g_mainWindow) InvalidateRect(g_mainWindow, nullptr, FALSE);
     }
     void RefreshControls();
     bool HandleNavigationKey(WPARAM key);
@@ -188,6 +230,16 @@ namespace
     void UpdateLayoutAndControls(int width, int height)
     {
         if (!g_controller || !g_d2dContext || width <= 0 || height <= 0) return;
+        g_d2dContext->SetChatFontSize(g_controller->GetChatFontSize());
+        if (std::abs(g_editChatFontSize - g_controller->GetChatFontSize()) > 0.01f) UpdateEditFont();
+
+        const auto dropdown = g_controller->GetActiveDropdown();
+        if (dropdown != g_layoutDropdown)
+        {
+            g_dropdownScrollOffset = 0.0f;
+            g_layoutDropdown = dropdown;
+            if (g_dragDropdown) { g_dragDropdown = false; ReleaseCapture(); }
+        }
 
         Lattice::UIComponents::ComputeLayout(
             g_layoutMetrics,
@@ -202,7 +254,10 @@ namespace
             g_controller->GetActiveDropdown(),
             g_controller->GetCurrentDropdownItems(),
             g_controller->GetSidebarScrollOffset(), g_controller->GetProjectExpanded(),
-            !g_controller->GetCurrentProjectPath().empty());
+            !g_controller->GetCurrentProjectPath().empty(), g_dropdownScrollOffset,
+            g_controller->GetAgents(), g_controller->GetMcpServers(), g_controller->GetChatFontSize());
+
+        g_dropdownScrollOffset = g_layoutMetrics.dropdownScrollOffset;
 
         g_controller->SetSidebarScrollMetrics(g_layoutMetrics.sidebarMaxScroll);
         const auto* session = ActiveSessionFor(*g_controller);
@@ -212,6 +267,7 @@ namespace
                 *g_d2dContext, g_layoutMetrics, *session);
             g_controller->SetActiveScrollMetrics(Lattice::UIComponents::UpdateConversationScrollMetrics(
                 g_layoutMetrics, contentHeight, session->scrollOffset));
+            Lattice::UIComponents::UpdateConversationCopyTargets(*g_d2dContext, g_layoutMetrics, *session);
             Lattice::UIComponents::UpdateConversationScrollMetrics(g_layoutMetrics, contentHeight, session->scrollOffset);
         }
         else
@@ -313,13 +369,41 @@ namespace
     void ExecuteTarget(const Lattice::HitTestResult& target)
     {
         SyncEditControlToController();
+        const auto previousDropdown = g_controller->GetActiveDropdown();
         using Lattice::HitTargetType;
-        if (target.type == HitTargetType::TitleSearch) OpenSearch();
+        const bool rankAction = target.type == HitTargetType::SidebarAgentMoveUp || target.type == HitTargetType::SidebarAgentMoveDown;
+        const auto focusedAgent = g_keyboardFocus && rankAction && target.index >= 0 && target.index < static_cast<int>(g_controller->GetAgents().size())
+            ? g_controller->GetAgents()[target.index].fullPath : std::wstring{};
+        if (target.type == HitTargetType::CopyChat) CopyChatText();
+        else if (target.type == HitTargetType::CopyMessage) CopyChatText(target.index);
+        else if (target.type == HitTargetType::DropdownItem && previousDropdown == Lattice::ActiveDropdown::Session
+            && target.index >= 0 && target.index < static_cast<int>(g_controller->GetCurrentDropdownItems().size())
+            && g_controller->GetCurrentDropdownItems()[target.index].label == L"Copy chat")
+        { g_controller->CloseDropdown(); CopyChatText(); }
         else if (target.type == HitTargetType::ComposerEdit) FocusComposer();
         else if (target.type == HitTargetType::TabPrevious || target.type == HitTargetType::TabNext)
             g_controller->SelectSession(g_controller->GetActiveTab() + (target.type == HitTargetType::TabPrevious ? -1 : 1));
         else g_controller->HandleClick(target);
-        g_dropdownIndex = 0; RefreshControls();
+        if (target.type == HitTargetType::DropdownItem && previousDropdown == g_controller->GetActiveDropdown())
+        {
+            // Refresh can replace rows while leaving a scrolled picker open.
+            // Require a new pointer/key choice before Enter selects any row.
+            g_dropdownIndex = -1; g_hoveredTarget = {};
+        }
+        else g_dropdownIndex = 0;
+        if (!focusedAgent.empty())
+        {
+            const auto& agents = g_controller->GetAgents();
+            for (size_t i = 0; i < agents.size(); ++i)
+                if (agents[i].fullPath == focusedAgent)
+                {
+                    const auto direction = target.type == HitTargetType::SidebarAgentMoveUp
+                        ? (i > 0 ? HitTargetType::SidebarAgentMoveUp : HitTargetType::SidebarAgentMoveDown)
+                        : (i + 1 < agents.size() ? HitTargetType::SidebarAgentMoveDown : HitTargetType::SidebarAgentMoveUp);
+                    g_keyboardTarget = {direction, static_cast<int>(i), {}}; break;
+                }
+        }
+        RefreshControls();
     }
     std::vector<Lattice::HitTestResult> FocusTargets()
     {
@@ -333,7 +417,6 @@ namespace
             r.bottom = (std::min)(r.bottom, g_layoutMetrics.sidebarViewport.bottom); add(type, r, index);
         };
         add(HitTargetType::MenuProject, g_layoutMetrics.menuProject); add(HitTargetType::MenuSession, g_layoutMetrics.menuSession);
-        add(HitTargetType::TitleSearch, g_layoutMetrics.titleSearch);
         add(HitTargetType::ActivityFiles, g_layoutMetrics.actBtnFiles); add(HitTargetType::ActivitySession, g_layoutMetrics.actBtnSession);
         add(HitTargetType::ActivityPlugins, g_layoutMetrics.actBtnPlugins);
         if (g_controller->GetSidebarMode() == Lattice::SidebarMode::Files)
@@ -345,12 +428,16 @@ namespace
         else if (g_controller->GetSidebarMode() == Lattice::SidebarMode::Session)
         {
             sidebar(HitTargetType::SidebarModelSelect, g_layoutMetrics.sidebarModelSelect);
-            sidebar(HitTargetType::SidebarAgentSelect, g_layoutMetrics.sidebarAgentSelect);
-            sidebar(HitTargetType::SidebarTogglePlan, g_layoutMetrics.sidebarTogglePlan);
-            sidebar(HitTargetType::SidebarToggleSafeTools, g_layoutMetrics.sidebarToggleSafeTools);
+            for (size_t i = 0; i < g_layoutMetrics.sidebarAgentRows.size(); ++i)
+            {
+                sidebar(HitTargetType::SidebarAgentItem, g_layoutMetrics.sidebarAgentToggleBtns[i], static_cast<int>(i));
+                sidebar(HitTargetType::SidebarAgentMoveUp, g_layoutMetrics.sidebarAgentMoveUpBtns[i], static_cast<int>(i));
+                sidebar(HitTargetType::SidebarAgentMoveDown, g_layoutMetrics.sidebarAgentMoveDownBtns[i], static_cast<int>(i));
+            }
             for (size_t i = 0; i < g_layoutMetrics.sidebarSkillRows.size(); ++i)
                 sidebar(HitTargetType::SidebarSkillItem, g_layoutMetrics.sidebarSkillRows[i], static_cast<int>(i));
-            sidebar(HitTargetType::SidebarAddSkill, g_layoutMetrics.sidebarAddSkillBtn);
+            for (size_t i = 0; i < g_layoutMetrics.sidebarMcpServerRows.size(); ++i)
+                sidebar(HitTargetType::SidebarMcpServerItem, g_layoutMetrics.sidebarMcpServerRows[i], static_cast<int>(i));
         }
         else
         {
@@ -365,6 +452,14 @@ namespace
             add(HitTargetType::TabClose, g_layoutMetrics.tabCloses[i], static_cast<int>(i));
         }
         add(HitTargetType::TabNext, g_layoutMetrics.tabNextBtn); add(HitTargetType::TabNew, g_layoutMetrics.tabNewBtn);
+        if (g_layoutMetrics.chatHasCopyableMessages) add(HitTargetType::CopyChat, g_layoutMetrics.chatCopyButton);
+        for (size_t i = 0; i < g_layoutMetrics.messageCopyButtons.size(); ++i)
+        {
+            auto rect = g_layoutMetrics.messageCopyButtons[i];
+            rect.top = (std::max)(rect.top, g_layoutMetrics.conversationArea.top);
+            rect.bottom = (std::min)(rect.bottom, g_layoutMetrics.conversationArea.bottom);
+            add(HitTargetType::CopyMessage, rect, static_cast<int>(i));
+        }
         add(HitTargetType::ComposerEdit, g_layoutMetrics.composerEditArea); add(HitTargetType::ComposerAttach, g_layoutMetrics.composerAttachBtn);
         add(HitTargetType::ComposerModelSelect, g_layoutMetrics.composerModelBtn); add(HitTargetType::ComposerContextChip, g_layoutMetrics.composerContextChip);
         add(HitTargetType::ComposerMic, g_layoutMetrics.composerMicBtn); add(HitTargetType::ComposerSend, g_layoutMetrics.composerSendBtn);
@@ -402,20 +497,62 @@ namespace
             const int count = static_cast<int>(g_controller->GetCurrentDropdownItems().size());
             if (key == VK_ESCAPE || key == VK_TAB)
             { g_keyboardFocus = false; g_controller->CloseDropdown(); RefreshControls(); FocusComposer(); return true; }
-            if (count && (key == VK_UP || key == VK_DOWN || key == VK_HOME || key == VK_END))
+            if (count && (key == VK_UP || key == VK_DOWN || key == VK_HOME || key == VK_END || key == VK_PRIOR || key == VK_NEXT))
             {
-                g_dropdownIndex = key == VK_HOME ? 0 : key == VK_END ? count - 1 :
-                    (g_dropdownIndex + count + (key == VK_UP ? -1 : 1)) % count;
-                InvalidateRect(g_mainWindow, nullptr, FALSE); return true;
+                const auto& items = g_controller->GetCurrentDropdownItems();
+                const int direction = key == VK_UP || key == VK_END || key == VK_PRIOR ? -1 : 1;
+                int next = key == VK_HOME ? -1 : key == VK_END ? count : g_dropdownIndex;
+                if (next < 0 || next >= count) next = direction > 0 ? -1 : count;
+                const int steps = key == VK_PRIOR || key == VK_NEXT ? 8 : 1;
+                for (int step = 0; step < steps; ++step)
+                {
+                    int candidate = next;
+                    bool found = false;
+                    for (int tried = 0; tried < count; ++tried)
+                    {
+                        candidate = (candidate + count + direction) % count;
+                        if (items[candidate].enabled) { next = candidate; found = true; break; }
+                    }
+                    if (!found) { next = -1; break; }
+                }
+                g_dropdownIndex = next;
+                g_dropdownScrollOffset = Lattice::UIComponents::EnsureDropdownItemVisible(g_layoutMetrics, next);
+                RefreshControls(); return true;
             }
             if (key == VK_RETURN || key == VK_SPACE)
-            { g_keyboardFocus = false; g_controller->HandleDropdownSelect(g_dropdownIndex); RefreshControls(); FocusComposer(); return true; }
+            { g_keyboardFocus = false; ExecuteTarget({Lattice::HitTargetType::DropdownItem, g_dropdownIndex, {}}); FocusComposer(); return true; }
         }
         if (key == VK_TAB) { NavigateFocus(shift); return true; }
         if (GetFocus() == g_mainWindow && g_keyboardFocus && (key == VK_RETURN || key == VK_SPACE))
         { ExecuteTarget(g_keyboardTarget); return true; }
         if (GetFocus() == g_mainWindow && (key == VK_PRIOR || key == VK_NEXT || key == VK_HOME || key == VK_END))
         {
+            using Lattice::HitTargetType;
+            const auto target = g_keyboardFocus ? g_keyboardTarget.type : HitTargetType::None;
+            const bool sidebarFocus = target == HitTargetType::SidebarModelSelect || target == HitTargetType::SidebarAgentMoveUp
+                || target == HitTargetType::SidebarAgentMoveDown || target == HitTargetType::SidebarAgentItem || target == HitTargetType::SidebarSkillItem || target == HitTargetType::SidebarMcpServerItem
+                || target == HitTargetType::SidebarProjectRow || target == HitTargetType::SidebarFileRow
+                || target == HitTargetType::SidebarPluginCard || target == HitTargetType::SidebarBrowsePlugins;
+            if (sidebarFocus)
+            {
+                if (key == VK_HOME) g_controller->SetSidebarScrollOffset(0);
+                else if (key == VK_END) g_controller->SetSidebarScrollOffset(g_layoutMetrics.sidebarMaxScroll);
+                else
+                {
+                    const float page = (std::max)(1.0f, g_layoutMetrics.sidebarViewport.bottom - g_layoutMetrics.sidebarViewport.top - 40.0f);
+                    g_controller->SetSidebarScrollOffset(g_controller->GetSidebarScrollOffset() + (key == VK_PRIOR ? -page : page));
+                }
+                RefreshControls();
+                // Keep subsequent page/home/end keys in this panel even when the
+                // original control has scrolled completely out of view.
+                for (const auto& next : FocusTargets())
+                {
+                    if (next.rect.left >= g_layoutMetrics.sidebar.left && next.rect.right <= g_layoutMetrics.sidebar.right
+                        && next.rect.top >= g_layoutMetrics.sidebarViewport.top && next.rect.bottom <= g_layoutMetrics.sidebarViewport.bottom)
+                    { g_keyboardTarget = next; g_keyboardFocus = true; break; }
+                }
+                return true;
+            }
             if (key == VK_HOME) g_controller->SetActiveScrollOffset(0);
             else if (key == VK_END)
             { if (const auto* session = ActiveSessionFor(*g_controller)) g_controller->SetActiveScrollOffset(session->maxScroll); }
@@ -426,7 +563,7 @@ namespace
     }
     bool HandleCommand(WORD command)
     {
-        if (!g_controller || command < NewSessionCommand || command > FindNextCommand) return false;
+        if (!g_controller || command < NewSessionCommand || command > CopyChatCommand) return false;
         SyncEditControlToController();
         if (command == ProjectMenuCommand) { OpenMenu(Lattice::ActiveDropdown::Project); return true; }
         if (command == SessionMenuCommand) { OpenMenu(Lattice::ActiveDropdown::Session); return true; }
@@ -444,6 +581,7 @@ namespace
         case FilesCommand: g_controller->HandleClick({Lattice::HitTargetType::ActivityFiles}); break;
         case SessionControlsCommand: g_controller->HandleClick({Lattice::HitTargetType::ActivitySession}); break;
         case PluginsCommand: g_controller->HandleClick({Lattice::HitTargetType::ActivityPlugins}); break;
+        case CopyChatCommand: CopyChatText(); break;
         case FindNextCommand:
             if (!*g_findText) OpenSearch();
             else if (!FindNext((g_find.Flags & FR_MATCHCASE) != 0)) MessageBeep(MB_ICONINFORMATION);
@@ -463,7 +601,8 @@ namespace
             {FVIRTKEY | FCONTROL, 'F', SearchCommand}, {FVIRTKEY | FALT, 'P', ProjectMenuCommand},
             {FVIRTKEY | FALT, 'S', SessionMenuCommand}, {FVIRTKEY | FCONTROL, 'L', FocusComposerCommand},
             {FVIRTKEY | FCONTROL, '1', FilesCommand}, {FVIRTKEY | FCONTROL, '2', SessionControlsCommand},
-            {FVIRTKEY | FCONTROL, '3', PluginsCommand}, {FVIRTKEY, VK_F3, FindNextCommand}
+            {FVIRTKEY | FCONTROL, '3', PluginsCommand}, {FVIRTKEY, VK_F3, FindNextCommand},
+            {FVIRTKEY | FCONTROL | FSHIFT, 'C', CopyChatCommand}
         };
         return CreateAcceleratorTableW(items, static_cast<int>(std::size(items)));
     }
@@ -559,7 +698,11 @@ namespace
             g_d2dContext->SetDpi(g_dpi);
 
             g_controller = std::make_unique<Lattice::AppController>();
+#ifdef LATTICE_TESTING
+            g_controller->Initialize(nullptr);
+#else
             g_controller->Initialize(hwnd);
+#endif
 
             // Edit control background brush (#202329 -> RGB 32, 35, 41)
             g_editBackgroundBrush = CreateSolidBrush(RGB(32, 35, 41));
@@ -644,17 +787,21 @@ namespace
 
             float x = static_cast<float>(GET_X_LPARAM(lParam)) / Scale();
             float y = static_cast<float>(GET_Y_LPARAM(lParam)) / Scale();
-            if (g_dragConversation || g_dragSidebar)
+            if (g_dragConversation || g_dragSidebar || g_dragDropdown)
             {
-                const auto track = g_dragSidebar ? g_layoutMetrics.sidebarViewport : g_layoutMetrics.scrollbarTrack;
-                const auto thumb = g_dragSidebar ? g_layoutMetrics.sidebarScrollbarThumb : g_layoutMetrics.scrollbarThumb;
+                const auto track = g_dragDropdown ? g_layoutMetrics.dropdownScrollTrack :
+                    g_dragSidebar ? g_layoutMetrics.sidebarViewport : g_layoutMetrics.scrollbarTrack;
+                const auto thumb = g_dragDropdown ? g_layoutMetrics.dropdownScrollThumb :
+                    g_dragSidebar ? g_layoutMetrics.sidebarScrollbarThumb : g_layoutMetrics.scrollbarThumb;
                 const float travel = track.bottom - track.top - (thumb.bottom - thumb.top);
                 const auto* session = ActiveSessionFor(*g_controller);
-                const float maxScroll = g_dragSidebar ? g_layoutMetrics.sidebarMaxScroll :
+                const float maxScroll = g_dragDropdown ? g_layoutMetrics.dropdownMaxScroll :
+                    g_dragSidebar ? g_layoutMetrics.sidebarMaxScroll :
                     (session ? session->maxScroll : 0.0f);
                 const float offset = travel > 0 ?
                     (std::clamp)(y - g_dragAnchor - track.top, 0.0f, travel) / travel * maxScroll : 0.0f;
-                if (g_dragSidebar) g_controller->SetSidebarScrollOffset(offset);
+                if (g_dragDropdown) { g_dropdownScrollOffset = offset; g_dropdownIndex = -1; g_hoveredTarget = {}; }
+                else if (g_dragSidebar) g_controller->SetSidebarScrollOffset(offset);
                 else g_controller->SetActiveScrollOffset(offset);
                 RefreshControls();
                 return 0;
@@ -701,6 +848,26 @@ namespace
 
             float x = static_cast<float>(GET_X_LPARAM(lParam)) / Scale();
             float y = static_cast<float>(GET_Y_LPARAM(lParam)) / Scale();
+            if (g_controller->GetActiveDropdown() != Lattice::ActiveDropdown::None)
+            {
+                if (Contains(g_layoutMetrics.dropdownScrollThumb, x, y))
+                {
+                    g_dragDropdown = true;
+                    g_dragAnchor = y - g_layoutMetrics.dropdownScrollThumb.top;
+                    SetCapture(hwnd); return 0;
+                }
+                if (Contains(g_layoutMetrics.dropdownScrollTrack, x, y))
+                {
+                    const auto& track = g_layoutMetrics.dropdownScrollTrack;
+                    const auto& thumb = g_layoutMetrics.dropdownScrollThumb;
+                    const float thumbHeight = thumb.bottom - thumb.top;
+                    const float travel = track.bottom - track.top - thumbHeight;
+                    g_dropdownScrollOffset = travel > 0 ? (std::clamp)(y - track.top - thumbHeight / 2, 0.0f, travel)
+                        / travel * g_layoutMetrics.dropdownMaxScroll : 0.0f;
+                    g_dropdownIndex = -1; g_hoveredTarget = {};
+                    RefreshControls(); return 0;
+                }
+            }
             if (g_controller->GetActiveDropdown() == Lattice::ActiveDropdown::None)
             {
                 if (Contains(g_layoutMetrics.scrollbarThumb, x, y) || Contains(g_layoutMetrics.sidebarScrollbarThumb, x, y))
@@ -728,6 +895,8 @@ namespace
                 g_controller->GetActiveDropdown(),
                 g_controller->GetCurrentDropdownItems());
 
+            if (g_controller->GetActiveDropdown() != Lattice::ActiveDropdown::None &&
+                target.type == Lattice::HitTargetType::None && Contains(g_layoutMetrics.dropdownRect, x, y)) return 0;
             ExecuteTarget(target);
 
             // If user clicked inside the composer box, focus the edit control
@@ -739,17 +908,28 @@ namespace
             return 0;
         }
         case WM_LBUTTONUP:
-            if (g_dragSidebar || g_dragConversation)
-            { g_dragSidebar = g_dragConversation = false; ReleaseCapture(); }
+            if (g_dragSidebar || g_dragConversation || g_dragDropdown)
+            { g_dragSidebar = g_dragConversation = g_dragDropdown = false; ReleaseCapture(); }
             return 0;
         case WM_CAPTURECHANGED:
-            g_dragSidebar = g_dragConversation = false;
+            g_dragSidebar = g_dragConversation = g_dragDropdown = false;
             return 0;
 
         case WM_MOUSEWHEEL:
         {
             POINT point{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) }; ScreenToClient(hwnd, &point);
             const float delta = GET_WHEEL_DELTA_WPARAM(wParam) / 120.0f;
+            if (g_controller->GetActiveDropdown() != Lattice::ActiveDropdown::None)
+            {
+                if (Contains(g_layoutMetrics.dropdownRect, point.x / Scale(), point.y / Scale()))
+                {
+                    g_dropdownScrollOffset = (std::clamp)(g_dropdownScrollOffset - delta * 90.0f, 0.0f,
+                        g_layoutMetrics.dropdownMaxScroll);
+                    g_dropdownIndex = -1; g_hoveredTarget = {};
+                    RefreshControls();
+                }
+                return 0;
+            }
             if (Contains(g_layoutMetrics.sidebar, point.x / Scale(), point.y / Scale())) g_controller->ScrollSidebar(delta);
             else if (Contains(g_layoutMetrics.conversationArea, point.x / Scale(), point.y / Scale())) g_controller->ScrollActiveTab(delta);
             RefreshControls();
@@ -790,8 +970,12 @@ namespace
                 if (g_controller)
                 {
                     g_controller->OnTimer();
+                    if (g_copyFeedbackUntil && GetTickCount64() >= g_copyFeedbackUntil)
+                    { g_copyFeedback.clear(); g_copyFeedbackUntil = 0; InvalidateRect(hwnd, nullptr, FALSE); }
 
                     SyncControllerToEdit();
+                    RECT client{}; GetClientRect(hwnd, &client);
+                    UpdateLayoutAndControls(client.right - client.left, client.bottom - client.top);
                 }
             }
             return 0;
@@ -832,7 +1016,9 @@ namespace
                     g_controller->GetDraftText(),
                     hovered,
                     g_animTick,
-                    g_controller->IsGeneratingReply(), g_controller->GetCurrentProjectName());
+                    g_controller->IsGeneratingReply(), g_controller->GetCurrentProjectName(),
+                    g_controller->GetConnectionStatusLabel(), g_controller->IsConnectorConnected(), g_controller->GetActiveRequestError(),
+                    g_controller->GetAgents(), g_controller->GetMcpServers(), g_controller->GetResourcePreferencesError(), g_copyFeedback, g_copyFeedbackError);
 
                 if (g_keyboardFocus && g_keyboardTarget.type != Lattice::HitTargetType::ComposerEdit &&
                     g_controller->GetActiveDropdown() == Lattice::ActiveDropdown::None)
@@ -853,6 +1039,9 @@ namespace
         case WM_QUERYENDSESSION:
             SyncEditControlToController();
             return !g_controller || g_controller->CanCloseApplication();
+        case WM_ENDSESSION:
+            if (wParam && g_controller) g_controller->ShutdownConnector();
+            return 0;
         case WM_DESTROY:
         {
             KillTimer(hwnd, AnimTimerId);
@@ -898,16 +1087,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     std::vector<std::wstring> args;
     std::wstring outPath;
     std::wstring newDialogPath;
+    std::wstring settingsDialogPath;
     for (int i = 1; argv && i < argc; ++i)
     {
         args.emplace_back(argv[i]);
         if (args.back().rfind(L"--screenshot=", 0) == 0) outPath = args.back().substr(13);
         else if (args.back() == L"--screenshot") outPath = L"screenshot_production.png";
         else if (args.back().rfind(L"--screenshot-new=", 0) == 0) newDialogPath = args.back().substr(17);
+        else if (args.back().rfind(L"--screenshot-settings=", 0) == 0) settingsDialogPath = args.back().substr(22);
     }
     if (argv) LocalFree(argv);
     const auto hasArg = [&](const wchar_t* value)
     { return std::find(args.begin(), args.end(), value) != args.end(); };
+    if (!settingsDialogPath.empty())
+    {
+        std::wstring error;
+        const bool saved = Lattice::SaveSettingsDialogPreview(Lattice::Connector::Settings{}, settingsDialogPath, error);
+        if (!saved) OutputDebugStringW(error.c_str());
+        CoUninitialize(); return saved ? 0 : 1;
+    }
     if (!newDialogPath.empty())
     {
         Lattice::ItemTypeRegistry registry;
@@ -928,6 +1126,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 
         auto ctrl = std::make_unique<Lattice::AppController>();
         ctrl->Initialize(nullptr);
+        d2d->SetChatFontSize(ctrl->GetChatFontSize());
         if (hasArg(L"--new-session")) ctrl->NewSession();
 
         UINT w = 1140;
@@ -938,7 +1137,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
             ctrl->GetSidebarMode(), ctrl->GetTabs(), ctrl->GetActiveTab(),
             ctrl->GetFiles(), ctrl->GetSkills(), ctrl->GetPlugins(),
             ctrl->GetActiveDropdown(), ctrl->GetCurrentDropdownItems(), 0.0f, true,
-            !ctrl->GetCurrentProjectPath().empty());
+            !ctrl->GetCurrentProjectPath().empty(), 0.0f, ctrl->GetAgents(), ctrl->GetMcpServers(), ctrl->GetChatFontSize());
 
         if (hasArg(L"--sidebar=session"))
         {
@@ -970,10 +1169,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
             ctrl->GetSidebarMode(), ctrl->GetTabs(), ctrl->GetActiveTab(),
             ctrl->GetFiles(), ctrl->GetSkills(), ctrl->GetPlugins(),
             ctrl->GetActiveDropdown(), ctrl->GetCurrentDropdownItems(), 0.0f, true,
-            !ctrl->GetCurrentProjectPath().empty());
+            !ctrl->GetCurrentProjectPath().empty(), 0.0f, ctrl->GetAgents(), ctrl->GetMcpServers(), ctrl->GetChatFontSize());
         if (const auto* session = ActiveSessionFor(*ctrl))
+        {
             Lattice::UIComponents::UpdateConversationScrollMetrics(layout,
                 Lattice::UIComponents::MeasureConversationHeight(*d2d, layout, *session), session->scrollOffset);
+            Lattice::UIComponents::UpdateConversationCopyTargets(*d2d, layout, *session);
+        }
 
         bool saved = d2d->SaveRenderToPng(outPath, w, h, [&]() {
             Lattice::UIComponents::Render(
@@ -984,7 +1186,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
                 ctrl->GetPlugins(), ctrl->GetSelectedModel(),
                 ctrl->GetPlanBeforeEdits(), ctrl->GetAutoRunSafeTools(),
                 ctrl->GetIsListening(), ctrl->GetDraftText(),
-                Lattice::HitTestResult{}, 0.0f, false, ctrl->GetCurrentProjectName());
+                Lattice::HitTestResult{}, 0.0f, false, ctrl->GetCurrentProjectName(),
+                ctrl->GetConnectionStatusLabel(), ctrl->IsConnectorConnected(), ctrl->GetActiveRequestError(),
+                ctrl->GetAgents(), ctrl->GetMcpServers(), ctrl->GetResourcePreferencesError());
         });
 
         ctrl.reset(); d2d.reset();

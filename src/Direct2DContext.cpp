@@ -51,7 +51,27 @@ namespace Lattice
             !createFont(fontName, DWRITE_FONT_WEIGHT_ULTRA_BOLD, 9.0f, m_fontEyebrow) ||
             !createFont(L"Consolas", DWRITE_FONT_WEIGHT_NORMAL, 11.0f, m_fontCode)) return false;
         m_fontBody->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, 18.5f, 14.0f);
+        return CreateChatFonts(m_chatFontSize);
+    }
+    bool Direct2DContext::CreateChatFonts(float size)
+    {
+        if (!m_dwriteFactory) return false;
+        ComPtr<IDWriteTextFormat> body, code;
+        const float scale = size / 11.5f;
+        if (FAILED(m_dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"en-US", body.GetAddressOf())) ||
+            FAILED(m_dwriteFactory->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0f * scale, L"en-US", code.GetAddressOf()))) return false;
+        body->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, 18.5f * scale, 14.0f * scale);
+        code->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, 17.0f * scale, 13.0f * scale);
+        m_fontChat = std::move(body); m_fontChatCode = std::move(code);
         return true;
+    }
+    void Direct2DContext::SetChatFontSize(float size)
+    {
+        if (!std::isfinite(size) || size < 10.0f || size > 24.0f || size == m_chatFontSize) return;
+        if (m_dwriteFactory && !CreateChatFonts(size)) return;
+        m_chatFontSize = size;
     }
 
     bool Direct2DContext::CreateTargetBrushes(ID2D1RenderTarget* target)

@@ -77,13 +77,13 @@ int main()
             && fs::exists(project / L"files" / L"Readme.md"), "Registered file type did not dispatch to safe file creation.");
         Check(!controller.CreateNewItem(Request(ItemCategory::Files, L"work-session", L"Mismatch", project), error)
             && !controller.CreateNewItem(Request(ItemCategory::Files, L"unknown", L"Missing", project), error), "Unregistered or wrong-category type was dispatched.");
-        controller.SetActiveDropdown(ActiveDropdown::Model); controller.HandleDropdownSelect(1);
+        Check(controller.GetSelectedModel().empty(), "A disconnected empty workspace invents an upstream model.");
         request = Request(ItemCategory::Sessions, L"work-session", L"Planning \u03B2", project);
         Check(controller.CreateNewItem(request, error), "Saved Work Session creation failed.");
         const auto sessionFile = project / L"sessions" / L"Planning \u03B2.lattice";
         Check(controller.GetTabs().size() == 1 && controller.GetActiveTab() == 0 && controller.GetDraftText().empty()
             && controller.GetTabs()[0].messages.empty() && controller.GetTabs()[0].attachedPaths.empty()
-            && !controller.GetTabs()[0].dirty && controller.GetSelectedModel() == L"GPT-4.1", "Saved session was not blank, clean, and preference-preserving.");
+            && !controller.GetTabs()[0].dirty && controller.GetSelectedModel().empty(), "Saved session was not blank, clean, and preference-preserving.");
         SessionTab saved;
         Check(SessionPersistence::Load(sessionFile.wstring(), saved, error) && saved.projectName == L"Research \u03B1"
             && saved.projectPath == project.wstring() && saved.messages.empty(), "Saved session lost its validated project metadata.");

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(ConnectorStudio VERSION 1.0.3 LANGUAGES CXX RC)
+project(ConnectorStudio VERSION 1.2.0 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "Connector Studio requires Windows and the MSVC C++ toolchain.")
@@ -9,7 +9,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/x64/$<CONFIG>")
+if(NOT DEFINED CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/x64/$<CONFIG>")
+endif()
 
 set(LATTICE_CORE_SOURCES
     src/AppController.cpp
@@ -18,9 +20,15 @@ set(LATTICE_CORE_SOURCES
     src/SessionPersistence.cpp
     src/ItemTypeRegistry.cpp
     src/WorkProjectStore.cpp
-    src/NewItemDialog.cpp)
+    src/NewItemDialog.cpp
+    src/ConnectorClient.cpp
+    src/ProjectResources.cpp
+    src/MarkdownRenderer.cpp
+    src/McpClient.cpp
+    src/ChatCopy.cpp
+    src/SettingsDialog.cpp)
 set(LATTICE_WINDOWS_LIBRARIES
-    d2d1 dwrite windowscodecs comctl32 shlwapi shell32 ole32 user32 gdi32 comdlg32 dwmapi)
+    d2d1 dwrite windowscodecs comctl32 shlwapi shell32 ole32 user32 gdi32 comdlg32 dwmapi winhttp)
 
 function(lattice_target_defaults target)
     target_include_directories(${target} PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -38,7 +46,7 @@ lattice_target_defaults(ConnectorStudio)
 target_link_libraries(ConnectorStudio PRIVATE lattice_core)
 target_link_options(ConnectorStudio PRIVATE "/MANIFESTINPUT:${CMAKE_SOURCE_DIR}/resources/app.manifest")
 install(TARGETS ConnectorStudio RUNTIME DESTINATION .)
-install(FILES README.md LICENSE DESTINATION .)
+install(FILES README.md LICENSE THIRD_PARTY_NOTICES.txt DESTINATION .)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -51,12 +59,20 @@ if(BUILD_TESTING)
     add_executable(registry_tests tests/registry_tests.cpp)
     add_executable(project_tests tests/project_tests.cpp)
     add_executable(new_dialog_tests tests/new_dialog_tests.cpp)
+    add_executable(connector_tests tests/connector_tests.cpp)
+    add_executable(connection_controller_tests tests/connection_controller_tests.cpp)
+    add_executable(settings_dialog_tests tests/settings_dialog_tests.cpp)
+    add_executable(project_resource_tests tests/project_resource_tests.cpp)
+    add_executable(markdown_tests tests/markdown_tests.cpp)
+    add_executable(mcp_tests tests/mcp_tests.cpp)
     set(LATTICE_TEST_TARGETS
         persistence_tests controller_tests ui_layout_tests interaction_tests
-        registry_tests project_tests new_dialog_tests)
+        registry_tests project_tests new_dialog_tests
+        connector_tests connection_controller_tests settings_dialog_tests
+        project_resource_tests markdown_tests mcp_tests)
     foreach(test_target IN LISTS LATTICE_TEST_TARGETS)
         lattice_target_defaults(${test_target})
-        target_link_libraries(${test_target} PRIVATE lattice_core)
+        target_link_libraries(${test_target} PRIVATE lattice_core ws2_32)
         set(test_workspace "${CMAKE_BINARY_DIR}/test-workspaces/${test_target}")
         file(MAKE_DIRECTORY "${test_workspace}")
         add_test(NAME ${test_target} COMMAND ${test_target})

@@ -25,6 +25,8 @@ namespace Lattice
         bool BeginDraw();
         void SetDpi(float dpi);
         float GetDpi() const { return m_dpi; }
+        float GetChatFontSize() const { return m_chatFontSize; }
+        void SetChatFontSize(float size);
         HRESULT EndDraw();
 
         bool SaveRenderToPng(const std::wstring& filePath, UINT width, UINT height,
@@ -48,6 +50,8 @@ namespace Lattice
         IDWriteTextFormat* FontTinyBold() const { return m_fontTinyBold.Get(); }
         IDWriteTextFormat* FontEyebrow() const { return m_fontEyebrow.Get(); }
         IDWriteTextFormat* FontCode() const { return m_fontCode.Get(); }
+        IDWriteTextFormat* FontChat() const { return m_fontChat.Get(); }
+        IDWriteTextFormat* FontChatCode() const { return m_fontChatCode.Get(); }
 
         // Drawing primitives
         void FillRect(const D2D1_RECT_F& rect, D2D1_COLOR_F color);
@@ -75,6 +79,7 @@ namespace Lattice
     private:
         HWND m_hwnd = nullptr;
         float m_dpi = 96.0f;
+        float m_chatFontSize = 11.5f;
         ComPtr<ID2D1Factory> m_d2dFactory;
         ComPtr<ID2D1HwndRenderTarget> m_renderTarget;
         ID2D1RenderTarget* m_activeRenderTarget = nullptr;
@@ -92,8 +97,11 @@ namespace Lattice
         ComPtr<IDWriteTextFormat> m_fontTinyBold;
         ComPtr<IDWriteTextFormat> m_fontEyebrow;
         ComPtr<IDWriteTextFormat> m_fontCode;
+        ComPtr<IDWriteTextFormat> m_fontChat;
+        ComPtr<IDWriteTextFormat> m_fontChatCode;
 
         bool CreateDeviceIndependentResources();
+        bool CreateChatFonts(float size);
         bool CreateDeviceResources();
         bool CreateTargetBrushes(ID2D1RenderTarget* target);
         void DiscardDeviceResources();

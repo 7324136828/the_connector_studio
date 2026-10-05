@@ -1,16 +1,27 @@
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
-    [switch]$IncludeSymbols
+    [switch]$IncludeSymbols,
+    [ValidateRange(1, 32)]
+    [int]$MaxParallelJobs = 2,
+    [string]$ExecutablePath = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
+if ($ExecutablePath -and -not $SkipBuild) { throw 'Use -SkipBuild when packaging an explicit ExecutablePath.' }
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'build.ps1') -Configuration Release -RunTests
+    & (Join-Path $PSScriptRoot 'build.ps1') -Configuration Release -RunTests -MaxParallelJobs $MaxParallelJobs
 }
 
-$exePath = Join-Path $repoRoot 'build\x64\Release\ConnectorStudio.exe'
+$exePath = if ($ExecutablePath) {
+    $requestedExePath = if ([System.IO.Path]::IsPathRooted($ExecutablePath)) { $ExecutablePath } else { Join-Path $repoRoot $ExecutablePath }
+    [System.IO.Path]::GetFullPath($requestedExePath)
+} else { Join-Path $repoRoot 'build\x64\Release\ConnectorStudio.exe' }
+$repoPrefix = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+if (-not $exePath.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'ExecutablePath must be inside this repository.'
+}
 if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     throw 'Build Release before packaging with -SkipBuild.'
 }
@@ -25,8 +36,9 @@ New-Item -ItemType Directory -Path $packageRoot, $distributionRoot -Force | Out-
 Copy-Item -LiteralPath $exePath -Destination (Join-Path $packageRoot 'ConnectorStudio.exe')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $packageRoot
+Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.txt') -Destination $packageRoot
 if ($IncludeSymbols) {
-    $symbolsPath = Join-Path $repoRoot 'build\x64\Release\ConnectorStudio.pdb'
+    $symbolsPath = Join-Path (Split-Path -Parent $exePath) 'ConnectorStudio.pdb'
     if (Test-Path -LiteralPath $symbolsPath -PathType Leaf) {
         Copy-Item -LiteralPath $symbolsPath -Destination $packageRoot
     }

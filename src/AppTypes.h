@@ -82,7 +82,7 @@ namespace Lattice
         bool dirty = false;
         std::wstring projectPath;
         std::vector<std::wstring> attachedPaths;
-        std::wstring selectedModel = L"Claude 3.7 Sonnet";
+        std::wstring selectedModel;
         bool planBeforeEdits = true;
         bool autoRunSafeTools = true;
         bool scrollToEnd = false;
@@ -93,8 +93,29 @@ namespace Lattice
         std::wstring badge;
         std::wstring name;
         std::wstring description;
-        bool isEnabled = true;
+        bool isEnabled = false;
         std::wstring fullPath;
+    };
+
+    struct AgentItem
+    {
+        std::wstring name;
+        std::wstring fullPath;
+        int priority = 0; // Display order is the vector order, starting at one.
+        bool isEnabled = false;
+    };
+
+    enum class McpConnectionState { Disabled, Connecting, Connected };
+
+    struct McpServerItem
+    {
+        std::wstring name;
+        std::wstring fullPath;
+        bool isEnabled = false;
+        std::wstring description;
+        McpConnectionState connectionState = McpConnectionState::Disabled;
+        std::wstring connectionError;
+        std::wstring serverKey;
     };
 
     struct PluginItem
@@ -110,5 +131,7 @@ namespace Lattice
         std::wstring label;
         std::wstring shortcut;
         bool hasDivider = false;
+        bool enabled = true;
+        bool selected = false;
     };
 }

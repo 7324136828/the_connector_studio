@@ -1,5 +1,7 @@
 #include "UIComponents.h"
 #include "AppIdentity.h"
+#include "MarkdownRenderer.h"
+#include "ChatCopy.h"
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
@@ -15,7 +17,9 @@ namespace Lattice
         SidebarMode sidebarMode, const std::vector<SessionTab>& tabs, int activeTab,
         const std::vector<FileItem>& files, const std::vector<SkillItem>& skills,
         const std::vector<PluginItem>& plugins, ActiveDropdown activeDropdown,
-        const std::vector<MenuItem>& dropdownItems, float sidebarScrollOffset, bool projectExpanded, bool hasCurrentProject)
+        const std::vector<MenuItem>& dropdownItems, float sidebarScrollOffset, bool projectExpanded, bool hasCurrentProject,
+        float dropdownScrollOffset, const std::vector<AgentItem>& agents,
+        const std::vector<McpServerItem>& mcpServers, float chatFontSize)
     {
         // Start from fresh geometry so hidden controls never retain stale hit targets.
         layout = LayoutMetrics{};
@@ -32,7 +36,6 @@ namespace Lattice
         layout.menuSession = D2D1::RectF(134.0f, 7.0f, 194.0f, 31.0f);
         const float center = width * 0.5f;
         layout.windowTitle = D2D1::RectF(center - 110.0f, 7.0f, center + 110.0f, 31.0f);
-        layout.titleSearch = D2D1::RectF(width - 68.0f, 6.0f, width - 41.0f, 33.0f);
 
         const float contentTop = 38.0f;
         const float contentBottom = (std::max)(contentTop, height - 24.0f);
@@ -75,23 +78,44 @@ namespace Lattice
             }
             curY += 14.0f;
         }
-        else if (sidebarMode == SidebarMode::Session && layout.hasActiveSession)
+        else if (sidebarMode == SidebarMode::Session)
         {
             curY += 12.0f;
             layout.sidebarModelSelect = D2D1::RectF(58.0f, curY + 20.0f, 264.0f, curY + 53.0f);
-            layout.sidebarAgentSelect = D2D1::RectF(58.0f, layout.sidebarModelSelect.bottom + 50.0f, 264.0f, layout.sidebarModelSelect.bottom + 83.0f);
-            curY += 76.0f + 12.0f + 56.0f;
-            layout.sidebarTogglePlan = D2D1::RectF(236.0f, curY, 264.0f, curY + 15.0f);
-            curY += 24.0f;
-            layout.sidebarToggleSafeTools = D2D1::RectF(236.0f, curY, 264.0f, curY + 15.0f);
-            curY += 34.0f + 22.0f;
+            curY = layout.sidebarModelSelect.bottom + 34.0f;
+            const auto beginSection = [&](D2D1_RECT_F& heading) {
+                heading = D2D1::RectF(58.0f, curY, 264.0f, curY + 18.0f);
+                curY += 26.0f;
+            };
+            beginSection(layout.sidebarAgentsHeading);
+            layout.sidebarAgentMoveUpBtns.resize(agents.size());
+            layout.sidebarAgentMoveDownBtns.resize(agents.size());
+            for (size_t i = 0; i < agents.size(); ++i)
+            {
+                layout.sidebarAgentRows.push_back(D2D1::RectF(58.0f, curY, 264.0f, curY + 48.0f));
+                layout.sidebarAgentToggleBtns.push_back(D2D1::RectF(235.0f, curY + 23.0f, 263.0f, curY + 45.0f));
+                if (i > 0) layout.sidebarAgentMoveUpBtns[i] = D2D1::RectF(182.0f, curY + 23.0f, 204.0f, curY + 45.0f);
+                if (i + 1 < agents.size()) layout.sidebarAgentMoveDownBtns[i] = D2D1::RectF(206.0f, curY + 23.0f, 228.0f, curY + 45.0f);
+                curY += 50.0f;
+            }
+            if (agents.empty()) curY += 30.0f;
+            curY += 12.0f;
+            beginSection(layout.sidebarSkillsHeading);
             for (size_t i = 0; i < skills.size(); ++i)
             {
-                layout.sidebarSkillRows.push_back(D2D1::RectF(58.0f, curY, 264.0f, curY + 36.0f));
-                curY += 38.0f;
+                layout.sidebarSkillRows.push_back(D2D1::RectF(58.0f, curY, 264.0f, curY + 40.0f));
+                curY += 42.0f;
             }
-            layout.sidebarAddSkillBtn = D2D1::RectF(58.0f, curY + 4.0f, 264.0f, curY + 34.0f);
-            curY += 46.0f;
+            if (skills.empty()) curY += 30.0f;
+            curY += 12.0f;
+            beginSection(layout.sidebarMcpServersHeading);
+            for (size_t i = 0; i < mcpServers.size(); ++i)
+            {
+                layout.sidebarMcpServerRows.push_back(D2D1::RectF(58.0f, curY, 264.0f, curY + 40.0f));
+                curY += 42.0f;
+            }
+            if (mcpServers.empty()) curY += 30.0f;
+            curY += 14.0f;
         }
         else if (sidebarMode == SidebarMode::Plugins)
         {
@@ -117,11 +141,15 @@ namespace Lattice
         offsetRect(layout.sidebarContextCard);
         for (auto& rect : layout.sidebarFileRows) offsetRect(rect);
         offsetRect(layout.sidebarModelSelect);
-        offsetRect(layout.sidebarAgentSelect);
-        offsetRect(layout.sidebarTogglePlan);
-        offsetRect(layout.sidebarToggleSafeTools);
+        offsetRect(layout.sidebarAgentsHeading);
+        offsetRect(layout.sidebarSkillsHeading);
+        offsetRect(layout.sidebarMcpServersHeading);
+        for (auto& rect : layout.sidebarAgentRows) offsetRect(rect);
+        for (auto& rect : layout.sidebarAgentToggleBtns) offsetRect(rect);
+        for (auto& rect : layout.sidebarAgentMoveUpBtns) offsetRect(rect);
+        for (auto& rect : layout.sidebarAgentMoveDownBtns) offsetRect(rect);
         for (auto& rect : layout.sidebarSkillRows) offsetRect(rect);
-        offsetRect(layout.sidebarAddSkillBtn);
+        for (auto& rect : layout.sidebarMcpServerRows) offsetRect(rect);
         for (auto& rect : layout.sidebarPluginCards) offsetRect(rect);
         offsetRect(layout.sidebarBrowsePluginsBtn);
         if (layout.sidebarMaxScroll > 0.0f && sidebarHeight > 0.0f)
@@ -167,13 +195,15 @@ namespace Lattice
         {
             const float headingTop = contentTop + 36.0f;
             layout.chatHeading = D2D1::RectF(276.0f, headingTop, width, headingTop + 72.0f);
-            const float composerTop = (std::max)(headingTop + 72.0f, contentBottom - 106.0f);
+            chatFontSize = std::isfinite(chatFontSize) ? (std::clamp)(chatFontSize, 10.0f, 24.0f) : 11.5f;
+            const float editHeight = (std::max)(40.0f, 40.0f * chatFontSize / 11.5f);
+            const float composerTop = (std::max)(headingTop + 72.0f, contentBottom - editHeight - 66.0f);
             layout.composerWrap = D2D1::RectF(276.0f, composerTop, width, contentBottom);
             const float composerWidth = (std::max)(1.0f, (std::min)(editorWidth - 64.0f, 760.0f));
             const float composerLeft = 276.0f + (editorWidth - composerWidth) * 0.5f;
-            layout.composerBox = D2D1::RectF(composerLeft, composerTop + 6.0f, composerLeft + composerWidth, composerTop + 92.0f);
-            layout.composerEditArea = D2D1::RectF(composerLeft + 14.0f, composerTop + 14.0f, composerLeft + composerWidth - 14.0f, composerTop + 54.0f);
-            const float toolbarY = composerTop + 56.0f;
+            layout.composerBox = D2D1::RectF(composerLeft, composerTop + 6.0f, composerLeft + composerWidth, composerTop + editHeight + 52.0f);
+            layout.composerEditArea = D2D1::RectF(composerLeft + 14.0f, composerTop + 14.0f, composerLeft + composerWidth - 14.0f, composerTop + editHeight + 14.0f);
+            const float toolbarY = composerTop + editHeight + 16.0f;
             layout.composerAttachBtn = D2D1::RectF(composerLeft + 8.0f, toolbarY, composerLeft + 37.0f, toolbarY + 28.0f);
             layout.composerModelBtn = D2D1::RectF(composerLeft + 42.0f, toolbarY, composerLeft + 172.0f, toolbarY + 28.0f);
             layout.composerContextChip = D2D1::RectF(composerLeft + 178.0f, toolbarY, composerLeft + 242.0f, toolbarY + 28.0f);
@@ -181,6 +211,8 @@ namespace Lattice
             layout.composerMicBtn = D2D1::RectF(composerLeft + composerWidth - 72.0f, toolbarY, composerLeft + composerWidth - 43.0f, toolbarY + 28.0f);
             layout.conversationArea = D2D1::RectF(276.0f, headingTop + 72.0f, width, composerTop);
             layout.conversationInner = D2D1::RectF(composerLeft, headingTop + 72.0f, composerLeft + composerWidth, composerTop);
+            layout.chatCopyButton = D2D1::RectF(layout.conversationInner.right - 78.0f, headingTop + 24.0f, layout.conversationInner.right, headingTop + 45.0f);
+            layout.chatHasCopyableMessages = std::any_of(tabs[activeTab].messages.begin(), tabs[activeTab].messages.end(), ChatCopy::HasContent);
             layout.scrollbarTrack = D2D1::RectF(width - 10.0f, headingTop + 72.0f, width - 2.0f, composerTop);
 
         }
@@ -191,31 +223,81 @@ namespace Lattice
             float dropdownWidth = 224.0f;
             bool preferAbove = false;
             if (activeDropdown == ActiveDropdown::Session) anchor = layout.menuSession;
-            else if (activeDropdown == ActiveDropdown::SidebarModel) { anchor = layout.sidebarModelSelect; dropdownWidth = 206.0f; }
-            else if (activeDropdown == ActiveDropdown::Model) { anchor = layout.composerModelBtn; dropdownWidth = 200.0f; preferAbove = true; }
+            else if (activeDropdown == ActiveDropdown::SidebarModel) { anchor = layout.sidebarModelSelect; layout.dropdownIsModel = true; }
+            else if (activeDropdown == ActiveDropdown::Model) { anchor = layout.composerModelBtn; layout.dropdownIsModel = true; preferAbove = true; }
             if (anchor.right <= anchor.left || anchor.bottom <= anchor.top) return;
-            float dropdownHeight = 12.0f;
-            for (const auto& item : dropdownItems) dropdownHeight += 30.0f + (item.hasDivider ? 6.0f : 0.0f);
-            dropdownWidth = (std::min)(dropdownWidth, width - 8.0f);
+            const auto rowHeight = [&](const MenuItem& item) {
+                return layout.dropdownIsModel && !item.shortcut.empty() && item.shortcut != item.label ? 46.0f : 30.0f;
+            };
+            for (const auto& item : dropdownItems)
+            {
+                layout.dropdownContentHeight += rowHeight(item) + (item.hasDivider ? 6.0f : 0.0f);
+                if (layout.dropdownIsModel)
+                {
+                    // Layout has no text renderer. Give long server IDs room and let
+                    // DirectWrite ellipsize the remaining text without wrapping rows.
+                    const float labelWidth = static_cast<float>(item.label.size()) * 7.0f + 54.0f;
+                    const float nameWidth = static_cast<float>(item.shortcut.size()) * 6.0f + 54.0f;
+                    dropdownWidth = (std::max)(dropdownWidth, (std::min)(640.0f, (std::max)(labelWidth, nameWidth)));
+                }
+            }
+            if (layout.dropdownIsModel) dropdownWidth = (std::max)(320.0f, dropdownWidth);
+            dropdownWidth = (std::max)(1.0f, (std::min)(dropdownWidth, width - 8.0f));
+            const float desiredHeight = layout.dropdownContentHeight + 12.0f;
+            const float above = (std::max)(0.0f, anchor.top - 7.0f);
+            const float below = (std::max)(0.0f, height - anchor.bottom - 7.0f);
+            const float maximumHeight = (std::min)(440.0f, (std::max)(1.0f, height - 8.0f));
+            const float targetHeight = (std::min)(desiredHeight, maximumHeight);
+            const bool openAbove = preferAbove ? (above >= targetHeight || above >= below) :
+                (below < targetHeight && above > below);
+            const float availableHeight = openAbove ? above : below;
+            const float dropdownHeight = (std::min)(targetHeight, (std::max)(12.0f, availableHeight));
             const float dropdownX = (std::clamp)(anchor.left, 4.0f, (std::max)(4.0f, width - dropdownWidth - 4.0f));
-            float dropdownY = anchor.bottom + 3.0f;
-            if (preferAbove || dropdownY + dropdownHeight > height - 4.0f) dropdownY = anchor.top - dropdownHeight - 3.0f;
+            float dropdownY = openAbove ? anchor.top - dropdownHeight - 3.0f : anchor.bottom + 3.0f;
             dropdownY = (std::clamp)(dropdownY, 4.0f, (std::max)(4.0f, height - dropdownHeight - 4.0f));
             layout.dropdownRect = D2D1::RectF(dropdownX, dropdownY, dropdownX + dropdownWidth, dropdownY + dropdownHeight);
-            float itemY = dropdownY + 6.0f;
+            layout.dropdownViewport = D2D1::RectF(dropdownX + 5.0f, dropdownY + 6.0f,
+                dropdownX + dropdownWidth - 5.0f, dropdownY + dropdownHeight - 6.0f);
+            const float viewportHeight = (std::max)(0.0f, layout.dropdownViewport.bottom - layout.dropdownViewport.top);
+            layout.dropdownMaxScroll = (std::max)(0.0f, layout.dropdownContentHeight - viewportHeight);
+            layout.dropdownScrollOffset = std::isfinite(dropdownScrollOffset) ?
+                (std::clamp)(dropdownScrollOffset, 0.0f, layout.dropdownMaxScroll) : 0.0f;
+            float itemY = layout.dropdownViewport.top - layout.dropdownScrollOffset;
+            const float rowRight = layout.dropdownViewport.right - (layout.dropdownMaxScroll > 0.0f ? 9.0f : 0.0f);
             for (const auto& item : dropdownItems)
             {
                 if (item.hasDivider) itemY += 6.0f;
-                layout.dropdownItems.push_back(D2D1::RectF(dropdownX + 5.0f, itemY, dropdownX + dropdownWidth - 5.0f, itemY + 28.0f));
-                itemY += 30.0f;
+                const float itemHeight = rowHeight(item);
+                layout.dropdownItems.push_back(D2D1::RectF(layout.dropdownViewport.left, itemY, rowRight, itemY + itemHeight - 2.0f));
+                itemY += itemHeight;
+            }
+            if (layout.dropdownMaxScroll > 0.0f && viewportHeight > 0.0f)
+            {
+                layout.dropdownScrollTrack = D2D1::RectF(layout.dropdownViewport.right - 5.0f, layout.dropdownViewport.top,
+                    layout.dropdownViewport.right, layout.dropdownViewport.bottom);
+                const float thumbHeight = (std::min)(viewportHeight,
+                    (std::max)(22.0f, viewportHeight * viewportHeight / layout.dropdownContentHeight));
+                const float thumbY = layout.dropdownViewport.top + layout.dropdownScrollOffset / layout.dropdownMaxScroll *
+                    (viewportHeight - thumbHeight);
+                layout.dropdownScrollThumb = D2D1::RectF(layout.dropdownScrollTrack.left, thumbY,
+                    layout.dropdownScrollTrack.right, thumbY + thumbHeight);
             }
         }
+    }
+
+    float UIComponents::EnsureDropdownItemVisible(const LayoutMetrics& layout, int index)
+    {
+        if (index < 0 || index >= static_cast<int>(layout.dropdownItems.size())) return layout.dropdownScrollOffset;
+        const auto& row = layout.dropdownItems[index];
+        float offset = layout.dropdownScrollOffset;
+        if (row.top < layout.dropdownViewport.top) offset += row.top - layout.dropdownViewport.top;
+        else if (row.bottom > layout.dropdownViewport.bottom) offset += row.bottom - layout.dropdownViewport.bottom;
+        return (std::clamp)(offset, 0.0f, layout.dropdownMaxScroll);
     }
     HitTestResult UIComponents::HitTest(const LayoutMetrics& layout, float x, float y,
         SidebarMode sidebarMode, ActiveDropdown activeDropdown,
         const std::vector<MenuItem>& dropdownItems)
     {
-        (void)dropdownItems;
         HitTestResult res;
 
         // 1. Check open dropdown first
@@ -223,11 +305,16 @@ namespace Lattice
         {
             if (PointInRect(layout.dropdownRect, x, y))
             {
+                if (PointInRect(layout.dropdownScrollThumb, x, y))
+                    return {HitTargetType::DropdownScrollbarThumb, -1, layout.dropdownScrollThumb};
+                if (PointInRect(layout.dropdownScrollTrack, x, y))
+                    return {HitTargetType::DropdownScrollbarTrack, -1, layout.dropdownScrollTrack};
+                if (!PointInRect(layout.dropdownViewport, x, y)) return res;
                 for (size_t i = 0; i < layout.dropdownItems.size(); ++i)
                 {
                     if (PointInRect(layout.dropdownItems[i], x, y))
                     {
-                        if (i >= dropdownItems.size()) return res;
+                        if (i >= dropdownItems.size() || !dropdownItems[i].enabled) return res;
                         res.type = HitTargetType::DropdownItem;
                         res.index = static_cast<int>(i);
                         res.rect = layout.dropdownItems[i];
@@ -270,12 +357,6 @@ namespace Lattice
                 res.rect = layout.menuSession;
                 return res;
             }
-            if (PointInRect(layout.titleSearch, x, y))
-            {
-                res.type = HitTargetType::TitleSearch;
-                res.rect = layout.titleSearch;
-                return res;
-            }
             return res;
         }
 
@@ -312,23 +393,26 @@ namespace Lattice
                     }
                 }
             }
-            else if (sidebarMode == SidebarMode::Session && layout.hasActiveSession)
+            else if (sidebarMode == SidebarMode::Session)
             {
                 if (PointInRect(layout.sidebarModelSelect, x, y))
                 {
                     res.type = HitTargetType::SidebarModelSelect;
+                    res.rect = layout.sidebarModelSelect;
                     return res;
                 }
-                if (PointInRect(layout.sidebarAgentSelect, x, y)) { res.type = HitTargetType::SidebarAgentSelect; res.rect = layout.sidebarAgentSelect; return res; }
-                if (PointInRect(D2D1::RectF(layout.sidebar.left + 12.0f, layout.sidebarTogglePlan.top - 4.0f, layout.sidebar.right - 12.0f, layout.sidebarTogglePlan.bottom + 5.0f), x, y))
+                for (size_t i = 0; i < layout.sidebarAgentMoveUpBtns.size(); ++i)
                 {
-                    res.type = HitTargetType::SidebarTogglePlan;
-                    return res;
+                    if (PointInRect(layout.sidebarAgentMoveUpBtns[i], x, y))
+                        return {HitTargetType::SidebarAgentMoveUp, static_cast<int>(i), layout.sidebarAgentMoveUpBtns[i]};
                 }
-                if (PointInRect(D2D1::RectF(layout.sidebar.left + 12.0f, layout.sidebarToggleSafeTools.top - 4.0f, layout.sidebar.right - 12.0f, layout.sidebarToggleSafeTools.bottom + 5.0f), x, y))
+                for (size_t i = 0; i < layout.sidebarAgentToggleBtns.size(); ++i)
+                    if (PointInRect(layout.sidebarAgentToggleBtns[i], x, y))
+                        return {HitTargetType::SidebarAgentItem, static_cast<int>(i), layout.sidebarAgentToggleBtns[i]};
+                for (size_t i = 0; i < layout.sidebarAgentMoveDownBtns.size(); ++i)
                 {
-                    res.type = HitTargetType::SidebarToggleSafeTools;
-                    return res;
+                    if (PointInRect(layout.sidebarAgentMoveDownBtns[i], x, y))
+                        return {HitTargetType::SidebarAgentMoveDown, static_cast<int>(i), layout.sidebarAgentMoveDownBtns[i]};
                 }
                 for (size_t i = 0; i < layout.sidebarSkillRows.size(); ++i)
                 {
@@ -336,13 +420,14 @@ namespace Lattice
                     {
                         res.type = HitTargetType::SidebarSkillItem;
                         res.index = static_cast<int>(i);
+                        res.rect = layout.sidebarSkillRows[i];
                         return res;
                     }
                 }
-                if (PointInRect(layout.sidebarAddSkillBtn, x, y))
+                for (size_t i = 0; i < layout.sidebarMcpServerRows.size(); ++i)
                 {
-                    res.type = HitTargetType::SidebarAddSkill;
-                    return res;
+                    if (PointInRect(layout.sidebarMcpServerRows[i], x, y))
+                        return {HitTargetType::SidebarMcpServerItem, static_cast<int>(i), layout.sidebarMcpServerRows[i]};
                 }
             }
             else if (sidebarMode == SidebarMode::Plugins)
@@ -400,6 +485,13 @@ namespace Lattice
         if (PointInRect(layout.scrollbarThumb, x, y)) { res.type = HitTargetType::ScrollbarThumb; res.rect = layout.scrollbarThumb; return res; }
         if (layout.conversationMaxScroll > 0.0f && PointInRect(layout.scrollbarTrack, x, y)) { res.type = HitTargetType::ScrollbarTrack; res.rect = layout.scrollbarTrack; return res; }
 
+        if (layout.chatHasCopyableMessages && PointInRect(layout.chatCopyButton, x, y))
+            return {HitTargetType::CopyChat, -1, layout.chatCopyButton};
+        if (PointInRect(layout.conversationArea, x, y))
+            for (size_t i = 0; i < layout.messageCopyButtons.size(); ++i)
+                if (PointInRect(layout.messageCopyButtons[i], x, y))
+                    return {HitTargetType::CopyMessage, static_cast<int>(i), layout.messageCopyButtons[i]};
+
         // 6. Composer buttons
         if (PointInRect(layout.composerWrap, x, y))
         {
@@ -421,9 +513,12 @@ namespace Lattice
         const std::vector<SessionTab>& tabs, int activeTab,
         const std::vector<FileItem>& files, const std::vector<SkillItem>& skills,
         const std::vector<PluginItem>& plugins, const std::wstring& selectedModel,
-        bool planBeforeEdits, bool autoRunSafeTools, bool isListening,
+        bool /*planBeforeEdits*/, bool /*autoRunSafeTools*/, bool isListening,
         const std::wstring& draftText, HitTestResult hoveredTarget, float animTick, bool isGeneratingReply,
-        const std::wstring& currentProjectName)
+        const std::wstring& currentProjectName, const std::wstring& connectionStatus, bool connected,
+        const std::wstring& requestError, const std::vector<AgentItem>& agents,
+        const std::vector<McpServerItem>& mcpServers, const std::wstring& resourcePreferencesError,
+        const std::wstring& copyFeedback, bool copyFeedbackError)
     {
         // 1. Background fill
         ctx.FillRect(D2D1::RectF(0, 0, layout.windowWidth, layout.windowHeight), Colors::ShellBg);
@@ -441,7 +536,7 @@ namespace Lattice
         int attachedFilesCount = (activeTab >= 0 && activeTab < static_cast<int>(tabs.size())) ?
             tabs[activeTab].filesCount : 0;
         RenderSidebar(ctx, layout, sidebarMode, files, skills, plugins, selectedModel,
-            planBeforeEdits, autoRunSafeTools, attachedFilesCount, projectName, hoveredTarget);
+            attachedFilesCount, projectName, hoveredTarget, agents, mcpServers, resourcePreferencesError);
 
         // 5. Tabs
         RenderTabsBar(ctx, layout, tabs, activeTab, hoveredTarget);
@@ -450,9 +545,9 @@ namespace Lattice
         if (layout.hasActiveSession && activeTab >= 0 && activeTab < static_cast<int>(tabs.size()))
         {
             const auto& curSession = tabs[activeTab];
-            RenderChatHeading(ctx, layout, curSession);
+            RenderChatHeading(ctx, layout, curSession, connected, requestError, hoveredTarget);
             float totalH = 0.0f;
-            RenderConversation(ctx, layout, curSession, totalH);
+            RenderConversation(ctx, layout, curSession, totalH, hoveredTarget);
         }
 
         // 7. Composer
@@ -461,7 +556,7 @@ namespace Lattice
                 draftText, hoveredTarget, animTick, isGeneratingReply);
 
         // 8. Statusbar
-        RenderStatusbar(ctx, layout, animTick);
+        RenderStatusbar(ctx, layout, animTick, connectionStatus, connected, copyFeedback, copyFeedbackError);
 
         // 9. Dropdown overlay if open
         if (activeDropdown != ActiveDropdown::None)
@@ -522,10 +617,6 @@ namespace Lattice
 
         }
 
-        // Title search action.
-        if (hoveredTarget.type == HitTargetType::TitleSearch)
-            ctx.FillRoundedRect(layout.titleSearch, 4.0f, Colors::ButtonHover);
-        ctx.DrawIcon(IconType::Search, D2D1::RectF(layout.titleSearch.left + 6.0f, layout.titleSearch.top + 6.0f, layout.titleSearch.right - 6.0f, layout.titleSearch.bottom - 6.0f), Colors::TextMuted, 1.5f);
     }
 
     void UIComponents::RenderActivityBar(Direct2DContext& ctx, const LayoutMetrics& layout,
@@ -555,8 +646,10 @@ namespace Lattice
     void UIComponents::RenderSidebar(Direct2DContext& ctx, const LayoutMetrics& layout,
         SidebarMode sidebarMode, const std::vector<FileItem>& files,
         const std::vector<SkillItem>& skills, const std::vector<PluginItem>& plugins,
-        const std::wstring& selectedModel, bool planBeforeEdits, bool autoRunSafeTools,
-        int attachedFilesCount, const std::wstring& projectName, HitTestResult hoveredTarget)
+        const std::wstring& selectedModel,
+        int attachedFilesCount, const std::wstring& projectName, HitTestResult hoveredTarget,
+        const std::vector<AgentItem>& agents, const std::vector<McpServerItem>& mcpServers,
+        const std::wstring& resourcePreferencesError)
     {
         ctx.FillRect(layout.sidebar, Colors::SidebarBg);
         ctx.DrawLine(D2D1::Point2F(layout.sidebar.right, layout.sidebar.top),
@@ -658,75 +751,81 @@ namespace Lattice
 
             }
         }
-        else if (sidebarMode == SidebarMode::Session && layout.hasActiveSession)
+        else if (sidebarMode == SidebarMode::Session)
         {
-            // MODEL
-            float curY = layout.sidebarModelSelect.top - 20.0f;
-            ctx.DrawLine(D2D1::Point2F(layout.sidebar.left, curY - 12.0f), D2D1::Point2F(layout.sidebar.right, curY - 12.0f), Colors::SidebarBorder, 1.0f);
-            ctx.DrawTextW(L"MODEL", ctx.FontTinyBold(), D2D1::RectF(layout.sidebar.left + 14.0f, curY, layout.sidebar.right, curY + 16.0f), Colors::TextMuted);
-
+            const float modelY = layout.sidebarModelSelect.top - 20.0f;
+            ctx.DrawTextW(L"MODEL", ctx.FontTinyBold(), D2D1::RectF(58.0f, modelY, 264.0f, modelY + 16.0f), Colors::TextMuted);
             ctx.FillRoundedRect(layout.sidebarModelSelect, 5.0f, hoveredTarget.type == HitTargetType::SidebarModelSelect ? Colors::ButtonHover : Colors::SelectBg);
             ctx.DrawRoundedRect(layout.sidebarModelSelect, 5.0f, Colors::SelectBorder, 1.0f);
-            ctx.DrawTextSingleLine(selectedModel, ctx.FontSmall(), D2D1::RectF(layout.sidebarModelSelect.left + 10.0f, layout.sidebarModelSelect.top + 7.0f, layout.sidebarModelSelect.right - 25.0f, layout.sidebarModelSelect.bottom), Colors::TextMain);
-            ctx.DrawTextW(L"⌄", ctx.FontSmall(), D2D1::RectF(layout.sidebarModelSelect.right - 22.0f, layout.sidebarModelSelect.top + 7.0f, layout.sidebarModelSelect.right - 5.0f, layout.sidebarModelSelect.bottom), Colors::TextMuted);
+            ctx.DrawTextSingleLine(selectedModel.empty() ? L"Select model" : selectedModel, ctx.FontSmall(),
+                D2D1::RectF(layout.sidebarModelSelect.left + 10.0f, layout.sidebarModelSelect.top + 7.0f, layout.sidebarModelSelect.right - 25.0f, layout.sidebarModelSelect.bottom), Colors::TextMain);
+            ctx.DrawTextW(L"\u2304", ctx.FontSmall(), D2D1::RectF(layout.sidebarModelSelect.right - 22.0f, layout.sidebarModelSelect.top + 7.0f, layout.sidebarModelSelect.right - 5.0f, layout.sidebarModelSelect.bottom), Colors::TextMuted);
+            ctx.DrawTextSingleLine(resourcePreferencesError.empty() ? (layout.hasActiveSession ? L"Used for this session" : L"Default for new sessions") : resourcePreferencesError, ctx.FontTiny(),
+                D2D1::RectF(58.0f, layout.sidebarModelSelect.bottom + 6.0f, 264.0f, layout.sidebarModelSelect.bottom + 22.0f), resourcePreferencesError.empty() ? Colors::TextMuted : Colors::TrafficRed);
 
-            ctx.DrawTextW(L"Used for this session", ctx.FontTiny(), D2D1::RectF(layout.sidebarModelSelect.left, layout.sidebarModelSelect.bottom + 6.0f, layout.sidebarModelSelect.right, layout.sidebarModelSelect.bottom + 22.0f), Colors::TextMuted);
-
-            // AGENT
-            curY = layout.sidebarModelSelect.bottom + 30.0f;
-            ctx.DrawLine(D2D1::Point2F(layout.sidebar.left, curY - 8.0f), D2D1::Point2F(layout.sidebar.right, curY - 8.0f), Colors::SidebarBorder, 1.0f);
-            ctx.DrawTextW(L"AGENT", ctx.FontTinyBold(), D2D1::RectF(layout.sidebar.left + 14.0f, curY, layout.sidebar.right, curY + 16.0f), Colors::TextMuted);
-
-            const D2D1_RECT_F agentBtn = layout.sidebarAgentSelect;
-            ctx.FillRoundedRect(agentBtn, 5.0f, hoveredTarget.type == HitTargetType::SidebarAgentSelect ? Colors::ButtonHover : Colors::SelectBg);
-            ctx.DrawRoundedRect(agentBtn, 5.0f, Colors::SelectBorder, 1.0f);
-
-            D2D1_RECT_F badgeRect = D2D1::RectF(agentBtn.left + 8.0f, agentBtn.top + 7.0f, agentBtn.left + 26.0f, agentBtn.top + 25.0f);
-            ctx.FillRoundedRect(badgeRect, 4.0f, Colors::ToggleBgOn);
-            ctx.DrawTextW(L"A", ctx.FontTinyBold(), D2D1::RectF(badgeRect.left, badgeRect.top + 2.0f, badgeRect.right, badgeRect.bottom), Colors::White, DWRITE_TEXT_ALIGNMENT_CENTER);
-            ctx.DrawTextW(L"Local Agent", ctx.FontSmall(), D2D1::RectF(badgeRect.right + 8.0f, agentBtn.top + 7.0f, agentBtn.right - 25.0f, agentBtn.bottom), Colors::TextMain);
-            ctx.DrawTextW(L"⌄", ctx.FontSmall(), D2D1::RectF(agentBtn.right - 22.0f, agentBtn.top + 7.0f, agentBtn.right - 5.0f, agentBtn.bottom), Colors::TextMuted);
-
-            // Toggles
-            auto DrawToggle = [&](const D2D1_RECT_F& r, const std::wstring& label, bool on) {
-                float y = r.top;
-                ctx.DrawTextW(label, ctx.FontSmall(), D2D1::RectF(layout.sidebar.left + 14.0f, y, r.left - 5.0f, y + 20.0f), Colors::TextSub);
-                ctx.FillRoundedRect(r, 7.5f, on ? Colors::ToggleBgOn : Colors::ToggleBgOff);
-                float thumbX = on ? (r.right - 13.0f) : (r.left + 2.0f);
-                ctx.FillCircle(thumbX + 5.5f, r.top + 7.5f, 5.5f, on ? Colors::White : Colors::ToggleThumb);
+            const auto drawSection = [&](const D2D1_RECT_F& heading, const std::wstring& title, size_t count, const std::wstring& emptyText) {
+                ctx.DrawLine(D2D1::Point2F(layout.sidebar.left, heading.top - 8.0f), D2D1::Point2F(layout.sidebar.right, heading.top - 8.0f), Colors::SidebarBorder);
+                ctx.DrawTextW(title, ctx.FontTinyBold(), D2D1::RectF(heading.left, heading.top, heading.right - 30.0f, heading.bottom), Colors::TextMuted);
+                ctx.DrawTextW(std::to_wstring(count), ctx.FontTiny(), D2D1::RectF(heading.right - 28.0f, heading.top, heading.right, heading.bottom), Colors::TextMuted, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                if (!count) ctx.DrawTextW(emptyText, ctx.FontSmall(), D2D1::RectF(heading.left, heading.bottom + 8.0f, heading.right, heading.bottom + 28.0f), Colors::TextDark);
+            };
+            const auto drawMoveButton = [&](const D2D1_RECT_F& rect, bool up, bool enabled, int index) {
+                const auto target = up ? HitTargetType::SidebarAgentMoveUp : HitTargetType::SidebarAgentMoveDown;
+                const bool hovered = enabled && hoveredTarget.type == target && hoveredTarget.index == index;
+                if (hovered) ctx.FillRoundedRect(rect, 4.0f, Colors::ButtonHover);
+                const auto color = enabled ? Colors::TextMuted : Colors::TextDark;
+                const float midX = (rect.left + rect.right) * 0.5f;
+                const float midY = (rect.top + rect.bottom) * 0.5f;
+                const float tipY = midY + (up ? -3.0f : 3.0f), tailY = midY + (up ? 2.0f : -2.0f);
+                ctx.DrawLine(D2D1::Point2F(midX - 4.0f, tailY), D2D1::Point2F(midX, tipY), color, 1.5f);
+                ctx.DrawLine(D2D1::Point2F(midX, tipY), D2D1::Point2F(midX + 4.0f, tailY), color, 1.5f);
+            };
+            const auto drawFolderToggle = [&](const D2D1_RECT_F& row, const std::wstring& name, const std::wstring& description, bool enabled, HitTargetType type, int index, D2D1_COLOR_F detailColor) {
+                if (row.bottom <= layout.sidebarViewport.top || row.top >= layout.sidebarViewport.bottom) return;
+                if (hoveredTarget.type == type && hoveredTarget.index == index) ctx.FillRoundedRect(row, 4.0f, Colors::HoverBg);
+                ctx.DrawIcon(IconType::Folder, D2D1::RectF(row.left + 2.0f, row.top + 5.0f, row.left + 17.0f, row.top + 18.0f), Colors::TextMuted, 1.2f);
+                ctx.DrawTextSingleLine(name, ctx.FontSmallBold(), D2D1::RectF(row.left + 24.0f, row.top + 3.0f, row.right - 36.0f, row.top + 19.0f), Colors::TextMain);
+                ctx.DrawTextSingleLine(description, ctx.FontTiny(), D2D1::RectF(row.left + 24.0f, row.top + 20.0f, row.right - 36.0f, row.bottom), detailColor);
+                const auto toggle = D2D1::RectF(row.right - 29.0f, row.top + 12.5f, row.right - 1.0f, row.top + 27.5f);
+                ctx.FillRoundedRect(toggle, 7.5f, enabled ? Colors::ToggleBgOn : Colors::ToggleBgOff);
+                ctx.FillCircle(enabled ? toggle.right - 7.5f : toggle.left + 7.5f, (toggle.top + toggle.bottom) * 0.5f, 5.5f, enabled ? Colors::White : Colors::ToggleThumb);
             };
 
-            DrawToggle(layout.sidebarTogglePlan, L"Plan before edits", planBeforeEdits);
-            DrawToggle(layout.sidebarToggleSafeTools, L"Auto-run safe tools", autoRunSafeTools);
-
-            // SKILLS
-            curY = layout.sidebarToggleSafeTools.bottom + 20.0f;
-            ctx.DrawLine(D2D1::Point2F(layout.sidebar.left, curY - 8.0f), D2D1::Point2F(layout.sidebar.right, curY - 8.0f), Colors::SidebarBorder, 1.0f);
-            ctx.DrawTextW(L"SKILLS", ctx.FontTinyBold(), D2D1::RectF(layout.sidebar.left + 14.0f, curY, layout.sidebar.right, curY + 16.0f), Colors::TextMuted);
-
-            for (size_t i = 0; i < skills.size() && i < layout.sidebarSkillRows.size(); ++i)
+            drawSection(layout.sidebarAgentsHeading, L"AGENTS", agents.size(), L"No agents found");
+            for (size_t i = 0; i < agents.size() && i < layout.sidebarAgentRows.size(); ++i)
             {
-                const auto& s = skills[i];
-                const auto& r = layout.sidebarSkillRows[i];
-                if (hoveredTarget.type == HitTargetType::SidebarSkillItem && hoveredTarget.index == static_cast<int>(i)) ctx.FillRoundedRect(r, 4.0f, Colors::HoverBg);
-
-                D2D1_RECT_F bR = D2D1::RectF(r.left, r.top + 4.0f, r.left + 27.0f, r.top + 31.0f);
-                ctx.FillRoundedRect(bR, 5.0f, Colors::SkillBadgeBg);
-                ctx.DrawTextW(s.badge, ctx.FontTinyBold(), D2D1::RectF(bR.left, bR.top + 6.0f, bR.right, bR.bottom), Colors::SkillBadgeText, DWRITE_TEXT_ALIGNMENT_CENTER);
-
-                ctx.DrawTextW(s.name, ctx.FontSmallBold(), D2D1::RectF(bR.right + 8.0f, r.top + 2.0f, r.right - 25.0f, r.top + 18.0f), Colors::TextMain);
-                ctx.DrawTextW(s.description, ctx.FontTiny(), D2D1::RectF(bR.right + 8.0f, r.top + 18.0f, r.right - 25.0f, r.bottom), Colors::TextMuted);
-
-                if (s.isEnabled)
-                {
-                    ctx.DrawTextW(L"✓", ctx.FontSmallBold(), D2D1::RectF(r.right - 20.0f, r.top + 8.0f, r.right, r.bottom), Colors::CheckmarkGreen, DWRITE_TEXT_ALIGNMENT_CENTER);
-                }
+                const auto& row = layout.sidebarAgentRows[i];
+                if (row.bottom <= layout.sidebarViewport.top || row.top >= layout.sidebarViewport.bottom) continue;
+                const auto badge = D2D1::RectF(row.left + 1.0f, row.top + 23.0f, row.left + 23.0f, row.top + 45.0f);
+                ctx.FillRoundedRect(badge, 5.0f, Colors::PlanIconBg);
+                ctx.DrawTextW(std::to_wstring(i + 1), ctx.FontTinyBold(), D2D1::RectF(badge.left, badge.top + 4.0f, badge.right, badge.bottom), Colors::PlanIconText, DWRITE_TEXT_ALIGNMENT_CENTER);
+                ctx.DrawTextSingleLine(agents[i].name, ctx.FontSmallBold(), D2D1::RectF(row.left + 1.0f, row.top + 3.0f, row.right - 1.0f, row.top + 20.0f), Colors::TextMain);
+                ctx.DrawTextSingleLine(L"Priority " + std::to_wstring(i + 1), ctx.FontTiny(), D2D1::RectF(row.left + 30.0f, row.top + 27.0f, 176.0f, row.bottom), Colors::TextMuted);
+                drawMoveButton(D2D1::RectF(182.0f, row.top + 23.0f, 204.0f, row.top + 45.0f), true, i > 0, static_cast<int>(i));
+                drawMoveButton(D2D1::RectF(206.0f, row.top + 23.0f, 228.0f, row.top + 45.0f), false, i + 1 < agents.size(), static_cast<int>(i));
+                const auto toggleHit = layout.sidebarAgentToggleBtns[i];
+                if (hoveredTarget.type == HitTargetType::SidebarAgentItem && hoveredTarget.index == static_cast<int>(i)) ctx.FillRoundedRect(toggleHit, 4.0f, Colors::ButtonHover);
+                const auto toggle = D2D1::RectF(toggleHit.left, row.top + 26.5f, toggleHit.right, row.top + 41.5f);
+                ctx.FillRoundedRect(toggle, 7.5f, agents[i].isEnabled ? Colors::ToggleBgOn : Colors::ToggleBgOff);
+                ctx.FillCircle(agents[i].isEnabled ? toggle.right - 7.5f : toggle.left + 7.5f, row.top + 34.0f, 5.5f, agents[i].isEnabled ? Colors::White : Colors::ToggleThumb);
             }
-
-            // + Add skill
-            if (hoveredTarget.type == HitTargetType::SidebarAddSkill) ctx.FillRoundedRect(layout.sidebarAddSkillBtn, 5.0f, Colors::HoverBg);
-            ctx.DrawRoundedRect(layout.sidebarAddSkillBtn, 5.0f, Colors::PlanCardBorder, 1.0f);
-            ctx.DrawTextW(L"+ Add skill", ctx.FontSmall(), layout.sidebarAddSkillBtn, Colors::TextMuted, DWRITE_TEXT_ALIGNMENT_CENTER);
+            drawSection(layout.sidebarSkillsHeading, L"SKILLS", skills.size(), L"No skills found");
+            for (size_t i = 0; i < skills.size() && i < layout.sidebarSkillRows.size(); ++i)
+                drawFolderToggle(layout.sidebarSkillRows[i], skills[i].name,
+                    skills[i].description.empty() ? L"Skill folder" : skills[i].description, skills[i].isEnabled, HitTargetType::SidebarSkillItem, static_cast<int>(i), Colors::TextMuted);
+            drawSection(layout.sidebarMcpServersHeading, L"MCP SERVERS", mcpServers.size(), L"No MCP servers found");
+            for (size_t i = 0; i < mcpServers.size() && i < layout.sidebarMcpServerRows.size(); ++i)
+            {
+                const auto& row = layout.sidebarMcpServerRows[i];
+                if (row.bottom <= layout.sidebarViewport.top || row.top >= layout.sidebarViewport.bottom) continue;
+                const auto& server = mcpServers[i];
+                const bool connecting = server.connectionState == McpConnectionState::Connecting;
+                const auto detail = !server.connectionError.empty() ? L"Off: " + server.connectionError :
+                    (connecting ? L"Connecting..." : (server.connectionState == McpConnectionState::Connected || server.isEnabled ? L"Connected" : L"Disabled"));
+                drawFolderToggle(layout.sidebarMcpServerRows[i], server.name, detail,
+                    server.isEnabled || connecting, HitTargetType::SidebarMcpServerItem, static_cast<int>(i),
+                    server.connectionError.empty() ? Colors::TextMuted : Colors::TrafficRed);
+            }
         }
         else if (sidebarMode == SidebarMode::Plugins)
         {
@@ -822,7 +921,7 @@ namespace Lattice
     }
 
     void UIComponents::RenderChatHeading(Direct2DContext& ctx, const LayoutMetrics& layout,
-        const SessionTab& session)
+        const SessionTab& session, bool connected, const std::wstring& requestError, HitTestResult hoveredTarget)
     {
         ctx.FillRect(layout.chatHeading, Colors::ShellBg);
         ctx.DrawLine(D2D1::Point2F(layout.chatHeading.left, layout.chatHeading.bottom),
@@ -839,24 +938,28 @@ namespace Lattice
 
         // Heading title
         ctx.DrawTextSingleLine(session.title, ctx.FontHeading(),
-            D2D1::RectF(paddingLeft, layout.chatHeading.top + 22.0f, paddingRight - 74.0f, layout.chatHeading.top + 48.0f),
+            D2D1::RectF(paddingLeft, layout.chatHeading.top + 22.0f, paddingRight - 90.0f, layout.chatHeading.top + 48.0f),
             Colors::TextHeading);
 
         // Subtitle
         std::wstring sub = std::to_wstring(session.filesCount) + L" files in context";
         if (!session.projectName.empty()) sub = L"Working in " + session.projectName + L" \x00b7 " + sub;
+        if (!requestError.empty()) sub = requestError;
         ctx.DrawTextSingleLine(sub, ctx.FontSmall(),
             D2D1::RectF(paddingLeft, layout.chatHeading.top + 48.0f, paddingRight, layout.chatHeading.top + 64.0f),
-            Colors::TextMuted);
+            requestError.empty() ? Colors::TextMuted : Colors::TrafficRed);
 
         // Session State badge: ● Synced
         float badgeRight = paddingRight;
-        float badgeTop = layout.chatHeading.top + 28.0f;
-        ctx.DrawCircle(badgeRight - 55.0f, badgeTop + 7.0f, 4.5f, Colors::StatusDotRingGreen, 1.5f);
-        ctx.FillCircle(badgeRight - 55.0f, badgeTop + 7.0f, 3.0f, Colors::TabStatusGreen);
-        ctx.DrawTextW(L"Local", ctx.FontSmall(),
-            D2D1::RectF(badgeRight - 46.0f, badgeTop, badgeRight, badgeTop + 18.0f),
+        float badgeTop = layout.chatHeading.top + 7.0f;
+        ctx.FillCircle(badgeRight - 84.0f, badgeTop + 7.0f, 3.0f, connected ? Colors::TabStatusGreen : Colors::TextMuted);
+        ctx.DrawTextW(connected ? L"Connected" : L"Local", ctx.FontSmall(),
+            D2D1::RectF(badgeRight - 75.0f, badgeTop, badgeRight, badgeTop + 18.0f),
             Colors::TextMuted);
+        if (hoveredTarget.type == HitTargetType::CopyChat && layout.chatHasCopyableMessages) ctx.FillRoundedRect(layout.chatCopyButton, 4.0f, Colors::ButtonHover);
+        ctx.DrawRoundedRect(layout.chatCopyButton, 4.0f, Colors::PlanCardBorder);
+        ctx.DrawTextW(L"Copy chat", ctx.FontTiny(), D2D1::RectF(layout.chatCopyButton.left, layout.chatCopyButton.top + 4.0f,
+            layout.chatCopyButton.right, layout.chatCopyButton.bottom), layout.chatHasCopyableMessages ? Colors::TextSub : Colors::TextDark, DWRITE_TEXT_ALIGNMENT_CENTER);
         ctx.PopClip();
     }
 
@@ -877,7 +980,7 @@ namespace Lattice
         {
             MessageMeasurements result;
             textWidth = (std::max)(1.0f, textWidth);
-            result.bodyHeight = ctx.MeasureTextHeight(message.text, ctx.FontBody(), textWidth);
+            result.bodyHeight = MeasureMarkdown(ctx, message.text, textWidth);
             result.height = 18.0f + result.bodyHeight + 8.0f;
             for (const auto& item : message.items)
             {
@@ -928,9 +1031,22 @@ namespace Lattice
         }
         return layout.conversationMaxScroll;
     }
+    void UIComponents::UpdateConversationCopyTargets(Direct2DContext& ctx, LayoutMetrics& layout, const SessionTab& session)
+    {
+        layout.messageCopyButtons.assign(session.messages.size(), D2D1_RECT_F{});
+        if (!layout.hasActiveSession) return;
+        float y = layout.conversationInner.top + 44.0f - (std::clamp)(session.scrollOffset, 0.0f, layout.conversationMaxScroll);
+        const float width = (std::max)(1.0f, layout.conversationInner.right - layout.conversationInner.left - 38.0f);
+        for (size_t i = 0; i < session.messages.size(); ++i)
+        {
+            if (ChatCopy::HasContent(session.messages[i]))
+                layout.messageCopyButtons[i] = D2D1::RectF(layout.conversationInner.right - 46.0f, y - 1.0f, layout.conversationInner.right, y + 16.0f);
+            y += MeasureMessage(ctx, session.messages[i], width).height;
+        }
+    }
 
     void UIComponents::RenderConversation(Direct2DContext& ctx, const LayoutMetrics& layout,
-        const SessionTab& session, float& outTotalContentHeight)
+        const SessionTab& session, float& outTotalContentHeight, HitTestResult hoveredTarget)
     {
         ctx.FillRect(layout.conversationArea, Colors::ShellBg);
         ctx.PushClip(layout.conversationArea);
@@ -954,8 +1070,9 @@ namespace Lattice
             Colors::DateRuleText, DWRITE_TEXT_ALIGNMENT_CENTER);
         ctx.DrawLine(D2D1::Point2F(innerLeft + innerWidth * 0.67f, contentY + 6.0f), D2D1::Point2F(innerLeft + innerWidth, contentY + 6.0f), Colors::DateRuleLine);
         contentY += 28.0f;
-        for (const auto& message : session.messages)
+        for (size_t messageIndex = 0; messageIndex < session.messages.size(); ++messageIndex)
         {
+            const auto& message = session.messages[messageIndex];
             const auto measured = MeasureMessage(ctx, message, textWidth);
             // Keep measuring every row for exact bounds, but skip painting off-screen messages.
             if (contentY + measured.height < layout.conversationArea.top || contentY > layout.conversationArea.bottom)
@@ -974,9 +1091,15 @@ namespace Lattice
             else ctx.DrawTextW(L"You", ctx.FontTinyBold(), D2D1::RectF(avatar.left, avatar.top + 6.0f, avatar.right, avatar.bottom), Colors::White, DWRITE_TEXT_ALIGNMENT_CENTER);
             const float authorWidth = (std::min)(textWidth * 0.5f, ctx.MeasureTextWidth(message.author, ctx.FontBodyBold()));
             ctx.DrawTextW(message.author, ctx.FontBodyBold(), D2D1::RectF(textLeft, contentY, textLeft + authorWidth + 1.0f, contentY + 16.0f), Colors::TextMain);
-            ctx.DrawTextW(message.time, ctx.FontTiny(), D2D1::RectF(textLeft + authorWidth + 10.0f, contentY + 2.0f, textLeft + textWidth, contentY + 16.0f), Colors::TextDark);
+            ctx.DrawTextW(message.time, ctx.FontTiny(), D2D1::RectF(textLeft + authorWidth + 10.0f, contentY + 2.0f, textLeft + textWidth - 54.0f, contentY + 16.0f), Colors::TextDark);
+            if (ChatCopy::HasContent(message))
+            {
+                const auto copy = D2D1::RectF(textLeft + textWidth - 46.0f, contentY - 1.0f, textLeft + textWidth, contentY + 16.0f);
+                if (hoveredTarget.type == HitTargetType::CopyMessage && hoveredTarget.index == static_cast<int>(messageIndex)) ctx.FillRoundedRect(copy, 4.0f, Colors::ButtonHover);
+                ctx.DrawTextW(L"Copy", ctx.FontTiny(), D2D1::RectF(copy.left, copy.top + 3.0f, copy.right, copy.bottom), Colors::TextMuted, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
             float curY = contentY + 18.0f;
-            ctx.DrawTextW(message.text, ctx.FontBody(), D2D1::RectF(textLeft, curY, textLeft + textWidth, curY + measured.bodyHeight + 5.0f), Colors::TextSub);
+            RenderMarkdown(ctx, message.text, D2D1::RectF(textLeft, curY, textLeft + textWidth, curY + measured.bodyHeight + 5.0f), Colors::TextSub);
             curY += measured.bodyHeight + 8.0f;
             for (size_t i = 0; i < message.items.size(); ++i)
             {
@@ -1027,7 +1150,7 @@ namespace Lattice
         // Placeholder if empty
         if (draftText.empty())
         {
-            ctx.DrawTextW(L"Type a message or attach files", ctx.FontBody(),
+            ctx.DrawTextW(L"Type a message or attach files", ctx.FontChat(),
                 D2D1::RectF(layout.composerEditArea.left + 2.0f, layout.composerEditArea.top + 4.0f, layout.composerEditArea.right, layout.composerEditArea.bottom),
                 Colors::TextDark);
         }
@@ -1049,7 +1172,7 @@ namespace Lattice
         // Model selector button
         bool modelHover = (hoveredTarget.type == HitTargetType::ComposerModelSelect);
         ctx.FillRoundedRect(layout.composerModelBtn, 5.0f, modelHover ? Colors::ButtonHover : Colors::SelectBg);
-        ctx.DrawTextSingleLine(selectedModel + L" ⌄", ctx.FontTiny(),
+        ctx.DrawTextSingleLine((selectedModel.empty() ? L"Select model" : selectedModel) + L" ⌄", ctx.FontTiny(),
             D2D1::RectF(layout.composerModelBtn.left + 8.0f, layout.composerModelBtn.top + 7.0f, layout.composerModelBtn.right - 6.0f, layout.composerModelBtn.bottom),
             Colors::TextSub);
 
@@ -1083,12 +1206,16 @@ namespace Lattice
         // Send button
         const bool canSend = !isGeneratingReply && std::any_of(draftText.begin(), draftText.end(),
             [](wchar_t character) { return !std::iswspace(character); });
-        D2D1_COLOR_F sendBg = canSend ? Colors::SendButton : Colors::SendButtonDisabled;
-        D2D1_COLOR_F sendIconColor = canSend ? Colors::White : Colors::SendTextDisabled;
+        D2D1_COLOR_F sendBg = (canSend || isGeneratingReply) ? Colors::SendButton : Colors::SendButtonDisabled;
+        D2D1_COLOR_F sendIconColor = (canSend || isGeneratingReply) ? Colors::White : Colors::SendTextDisabled;
 
         ctx.FillRoundedRect(layout.composerSendBtn, 6.0f, sendBg);
-        ctx.DrawIcon(IconType::Send, D2D1::RectF(layout.composerSendBtn.left + 6.0f, layout.composerSendBtn.top + 6.0f, layout.composerSendBtn.right - 6.0f, layout.composerSendBtn.bottom - 6.0f),
-            sendIconColor, 1.5f);
+        if (isGeneratingReply)
+            ctx.FillRoundedRect(D2D1::RectF(layout.composerSendBtn.left + 10.0f, layout.composerSendBtn.top + 10.0f,
+                layout.composerSendBtn.right - 10.0f, layout.composerSendBtn.bottom - 10.0f), 1.5f, sendIconColor);
+        else
+            ctx.DrawIcon(IconType::Send, D2D1::RectF(layout.composerSendBtn.left + 6.0f, layout.composerSendBtn.top + 6.0f, layout.composerSendBtn.right - 6.0f, layout.composerSendBtn.bottom - 6.0f),
+                sendIconColor, 1.5f);
 
         // Hint below
         ctx.DrawTextW(L"Enter to send · Shift + Enter for new line", ctx.FontTiny(),
@@ -1096,7 +1223,8 @@ namespace Lattice
             Colors::TextDark, DWRITE_TEXT_ALIGNMENT_TRAILING);
     }
 
-    void UIComponents::RenderStatusbar(Direct2DContext& ctx, const LayoutMetrics& layout, float animTick)
+    void UIComponents::RenderStatusbar(Direct2DContext& ctx, const LayoutMetrics& layout, float animTick,
+        const std::wstring& connectionStatus, bool connected, const std::wstring& copyFeedback, bool copyFeedbackError)
     {
         ctx.FillRect(layout.statusbar, Colors::StatusbarBg);
         ctx.DrawLine(D2D1::Point2F(layout.statusbar.left, layout.statusbar.top),
@@ -1105,6 +1233,8 @@ namespace Lattice
         // Local session label.
         ctx.DrawTextW(L"⌁", ctx.FontTitle(), D2D1::RectF(12.0f, layout.statusbar.top + 2.0f, 26.0f, layout.statusbar.bottom), Colors::Eyebrow);
         ctx.DrawTextW(L"local", ctx.FontTiny(), D2D1::RectF(28.0f, layout.statusbar.top + 5.0f, 65.0f, layout.statusbar.bottom), Colors::TextMuted);
+        ctx.DrawTextSingleLine(copyFeedback, ctx.FontTiny(), D2D1::RectF(80.0f, layout.statusbar.top + 5.0f, layout.statusbar.right - 220.0f, layout.statusbar.bottom),
+            copyFeedbackError ? Colors::TrafficRed : Colors::CheckmarkGreen);
 
         // Offline and text encoding status.
         float rightX = layout.statusbar.right - 14.0f;
@@ -1114,9 +1244,9 @@ namespace Lattice
 
         // Offline status dot
         (void)animTick;
-        D2D1_COLOR_F dotColor = Colors::TextMuted;
-        ctx.FillCircle(rightX - 70.0f, layout.statusbar.top + 12.0f, 3.0f, dotColor);
-        ctx.DrawTextW(L"Offline", ctx.FontTiny(), D2D1::RectF(rightX - 62.0f, layout.statusbar.top + 5.0f, rightX, layout.statusbar.bottom), Colors::TextMuted);
+        D2D1_COLOR_F dotColor = connected ? Colors::TabStatusGreen : Colors::TextMuted;
+        ctx.FillCircle(rightX - 130.0f, layout.statusbar.top + 12.0f, 3.0f, dotColor);
+        ctx.DrawTextSingleLine(connectionStatus, ctx.FontTiny(), D2D1::RectF(rightX - 122.0f, layout.statusbar.top + 5.0f, rightX, layout.statusbar.bottom), Colors::TextMuted);
     }
 
     void UIComponents::RenderDropdown(Direct2DContext& ctx, const LayoutMetrics& layout,
@@ -1126,12 +1256,14 @@ namespace Lattice
         ctx.FillRoundedRect(layout.dropdownRect, 7.0f, Colors::DropdownBg);
         ctx.DrawRoundedRect(layout.dropdownRect, 7.0f, Colors::DropdownBorder, 1.0f);
 
+        ctx.PushClip(layout.dropdownViewport);
         for (size_t i = 0; i < items.size() && i < layout.dropdownItems.size(); ++i)
         {
             const auto& item = items[i];
             const auto& r = layout.dropdownItems[i];
+            if (r.bottom <= layout.dropdownViewport.top || r.top >= layout.dropdownViewport.bottom) continue;
 
-            bool hover = (hoveredTarget.type == HitTargetType::DropdownItem && hoveredTarget.index == static_cast<int>(i));
+            bool hover = item.enabled && (hoveredTarget.type == HitTargetType::DropdownItem && hoveredTarget.index == static_cast<int>(i));
             if (hover)
             {
                 ctx.FillRoundedRect(r, 4.0f, Colors::DropdownHover);
@@ -1142,14 +1274,32 @@ namespace Lattice
                 ctx.DrawLine(D2D1::Point2F(r.left, r.top - 2.0f), D2D1::Point2F(r.right, r.top - 2.0f), Colors::PlanCardBorder, 1.0f);
             }
 
-            ctx.DrawTextSingleLine(item.label, ctx.FontSmall(), D2D1::RectF(r.left + 9.0f, r.top + 5.0f, r.right - (item.shortcut.empty() ? 9.0f : 70.0f), r.bottom),
-                hover ? Colors::White : Colors::TextMain);
-
-            if (!item.shortcut.empty())
+            const auto textColor = !item.enabled ? Colors::TextMuted : (hover ? Colors::White : Colors::TextMain);
+            if (layout.dropdownIsModel)
             {
-                ctx.DrawTextW(item.shortcut, ctx.FontTiny(), D2D1::RectF(r.right - 70.0f, r.top + 6.0f, r.right - 9.0f, r.bottom),
-                    Colors::TextMuted, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                const float textLeft = r.left + 25.0f;
+                if (item.selected)
+                    ctx.DrawTextSingleLine(L"\u2713", ctx.FontSmall(), D2D1::RectF(r.left + 6.0f, r.top + 5.0f, textLeft - 2.0f, r.bottom), Colors::CheckmarkGreen);
+                ctx.DrawTextSingleLine(item.label, ctx.FontSmall(),
+                    D2D1::RectF(textLeft, r.top + 5.0f, r.right - 9.0f, r.bottom), textColor);
+                if (!item.shortcut.empty() && item.shortcut != item.label)
+                    ctx.DrawTextSingleLine(item.shortcut, ctx.FontTiny(),
+                        D2D1::RectF(textLeft, r.top + 23.0f, r.right - 9.0f, r.bottom), Colors::TextMuted);
             }
+            else
+            {
+                ctx.DrawTextSingleLine(item.label, ctx.FontSmall(), D2D1::RectF(r.left + 9.0f, r.top + 5.0f,
+                    r.right - (item.shortcut.empty() ? 9.0f : 70.0f), r.bottom), textColor);
+                if (!item.shortcut.empty())
+                    ctx.DrawTextW(item.shortcut, ctx.FontTiny(), D2D1::RectF(r.right - 70.0f, r.top + 6.0f, r.right - 9.0f, r.bottom),
+                        Colors::TextMuted, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            }
+        }
+        ctx.PopClip();
+        if (layout.dropdownMaxScroll > 0.0f)
+        {
+            ctx.FillRoundedRect(layout.dropdownScrollTrack, 2.5f, Colors::SelectBg);
+            ctx.FillRoundedRect(layout.dropdownScrollThumb, 2.5f, Colors::PlanCardBorder);
         }
     }
 }
