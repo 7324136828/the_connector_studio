@@ -70,8 +70,9 @@ non-streaming text requests to `POST /v1/chat/completions`. Stop cancels the
 request, removes its pending user entry, and restores submitted text alongside
 any newer draft. Switching tabs preserves response ownership. Connector errors
 keep the conversation intact. Managed project conversations support OpenAI-compatible
-function tool calls, including repeated tool/result turns. Standalone conversations
-remain text-only.
+function tool calls, including repeated tool/result turns. Open or create a project
+before starting a conversation; legacy standalone records must be associated
+with a project before sending new messages.
 
 Connector/provider credentials belong on the server. An optional
 `CONNECTOR_API_KEY` is read from the backend environment and is never returned
@@ -249,8 +250,8 @@ appears above the message input. Completed traces stay with their assistant repl
 in the conversation; cancelled or failed traces without a final reply stay in the
 conversation at their execution time. Sending another message keeps those earlier
 traces in place. Traces remain in SQLite and session files;
-parent v2 files include child snapshots so export/import retains inspectable
-agent runs. Imported active snapshots become cancelled and never resume work.
+parent v2 files include child snapshots so exports and project file opening retain inspectable
+agent runs. Opened active snapshots become cancelled and never resume work.
 
 Scripts run as the backend's operating-system account, so they can access files
 that account can access. This is local automation, not an OS sandbox. Working
@@ -272,7 +273,7 @@ its effort or model. Low is the default.
 | Medium | After each final answer, ask whether useful work remains. Keep recent conversation and enabled tools within approximately 100,000 tokens |
 | High | Continue after each final answer; summarize earlier public interaction at each 100,000-token threshold, retaining summaries and current work within approximately 100,000 tokens |
 | Extra high | The same continuation and 100,000-token summarization threshold, with approximately 200,000 tokens of retained context |
-| Max | The same threshold, with approximately 250,000 tokens of retained context, optional multi-agent tools, and one summary-of-summaries recovery attempt if the model stops responding |
+| Max | The same threshold, with approximately 250,000 tokens of retained context, optional multi-agent tools, and one summary-of-summaries recovery attempt for other connector failures |
 
 For every level above Low, the harness asks:
 
@@ -290,11 +291,10 @@ pinned prompt is missing or changed, execution reports an error instead of sendi
 a request without it. System instructions and enabled tools are also retained.
 Ambiguous or malformed controls are errors rather than an implicit decision to
 continue. Max checks only after all of that turn's delegated agents have finished
-or been stopped. If a Max work/check request stops responding, the harness
-summarizes public history and earlier summaries, asks again whether to continue,
-and either stops on `no` or continues from the compacted context on `yes`. There
-is one automatic recovery attempt per task; a second failed response is reported
-with the partial results retained.
+or been stopped. Other Max connector failures can trigger one public
+summary-of-summaries recovery, followed by a continuation check. Timeout failures
+use the configured retry policy described below; exhausting retries stops the task
+without an additional Max recovery request.
 
 Token counts are estimates from UTF-8 JSON bytes divided by three plus message
 overhead, because connected models can use different tokenizers. These are
@@ -326,6 +326,25 @@ SQLite and the session's version 2 `.lattice` metadata, including child snapshot
 and exports. If a final reply repeats an intermediate reply, it is shown once.
 Cancelled partials remain visible after reload, Save, Copy or export. Private
 provider reasoning is never displayed or recorded.
+
+**Provider response timeout** and **Timeout retries** in Connection settings
+apply to new conversations and agent tasks. Timeout accepts finite seconds from
+1 to 3,600 (default 120); retries accepts integers from 0 to 10 (default 2).
+The retry count is additional attempts after a timed-out provider request: two
+retries permit at most three attempts for a timed-out turn. Low effort stops on
+the first timeout even if retries are configured. Medium, High, Extra high, and
+Max retry timed-out work, continuation checks, and context-summary requests.
+Each retry uses the same prompt, conversation, and tool definitions; completed
+tools are not rerun. HTTP errors and malformed replies do not count as response
+timeouts. Retry status is saved with public progress and request history.
+
+Each task captures its timeout and retry settings when it starts. Subagents
+inherit that snapshot and the parent's effort, so changing settings during a task
+only affects later tasks. Exhausting all attempts stops the affected task, restores
+the main conversation's submitted draft, and retains public partial results.
+A timed-out child stays failed; its parent can inspect that result and continue
+other work. The parent cannot automatically restart the same failed child to bypass
+its retry limit. Stop cancels an in-flight request or retry immediately.
 
 At **any effort level**, the submit control becomes **Stop** in the same position
 while work runs, including during continuation checks, summaries and recovery.
@@ -372,7 +391,7 @@ Use absolute paths for overrides. A previously saved connection URL takes
 precedence over the initial `CONNECTOR_URL` until changed in Settings.
 
 The runner binds to loopback. This is a **single-user, single-process local
-application**, with bounded uploads, four simultaneous jobs, request timeouts,
+application**, with bounded requests, four simultaneous jobs, request timeouts,
 host/origin checks and project-file containment. Enabled project tools execute
 Python and shell commands under the local account.
 It is not an authenticated multi-tenant service. Before public hosting, add

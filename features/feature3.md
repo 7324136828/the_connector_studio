@@ -1,0 +1,3 @@
+Exception processing when timedout:
+
+Can you create a customized timeout (meaning we do not receive a response back from the provider) and a customized retry number (meaning if an agent, how many time we retry before we fully stop it) such that if the main conversation has timed out, we will use the retry flow rather than stop the conversation if effort level is above low and if all the retries failed, we will stop; for low effort, we will stop immediately? (for subagent in the multi-agent mode, we will follow the same model of retries and stops). 

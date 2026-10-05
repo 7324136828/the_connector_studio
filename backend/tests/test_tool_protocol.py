@@ -199,6 +199,27 @@ class TraceSessionTests(unittest.TestCase):
         self.assertEqual(decoded['child_sessions'][0]['live_updates'], [update])
         self.assertEqual(decoded['child_sessions'][0]['execution_state'], state)
 
+    def test_provider_retry_state_roundtrips_for_parent_and_child(self):
+        state = {'phase': 'retrying', 'iteration': 3, 'retry_attempt': 2, 'retry_limit': 4, 'provider_response_timeout': 1.5}
+        child = {**self.session(), 'id': str(uuid4()), 'is_agent': True, 'read_only': True, 'hidden': True, 'execution_state': dict(state)}
+        decoded = lattice.decode(lattice.encode({**self.session(), 'execution_state': state, 'child_sessions': [child]}))
+        self.assertEqual(decoded['execution_state'], state)
+        self.assertEqual(decoded['child_sessions'][0]['execution_state'], state)
+        for timeout in (-1, 0, .01, 3601, 10 ** 12):
+            with self.subTest(timeout=timeout):
+                special = {**state, 'provider_response_timeout': timeout}
+                result = lattice.decode(lattice.encode({**self.session(), 'execution_state': special}))
+                self.assertEqual(result['execution_state']['provider_response_timeout'], timeout)
+        for key, values in {
+            'retry_attempt': (-1, 11, True, 1.5, '1'),
+            'retry_limit': (-1, 11, True, 1.5, '1'),
+            'provider_response_timeout': (-2, -.5, True, '120', float('nan'), float('inf')),
+        }.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(ValueError):
+                        lattice.encode({**self.session(), 'execution_state': {**state, key: value}})
+
     def test_public_update_model_attribution_roundtrips_without_requiring_it_on_old_updates(self):
         old = {'id': str(uuid4()), 'job_id': str(uuid4()), 'text': 'Earlier public result.', 'created_at': '2026-10-04T12:00:00+00:00', 'kind': 'partial'}
         attributed = {**old, 'id': str(uuid4()), 'text': 'Result from the selected configuration.', 'model': 'provider/model-v2:latest'}

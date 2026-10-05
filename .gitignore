@@ -214,7 +214,7 @@ frontend/node_modules/
 frontend/dist/
 e2e/node_modules/
 e2e/playwright-report/
-e2e/test-results/
+e2e/test-results*/
 
 # Local application state
 data/*.db

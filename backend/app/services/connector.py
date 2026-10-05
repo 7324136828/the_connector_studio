@@ -1,4 +1,6 @@
 """Bounded, cancellable port of ConnectorClient.cpp's text API."""
+import asyncio
+from contextlib import nullcontext
 import json
 import re
 from uuid import uuid4
@@ -106,25 +108,46 @@ def _tools(tools):
 class ConnectorError(RuntimeError):
     pass
 
+
+class ConnectorTimeout(ConnectorError):
+    """A provider request missed its response deadline; safe to retry its payload."""
+
+
+class ProviderTimeoutExhausted(ConnectorTimeout):
+    """The effort-specific timeout attempt budget is exhausted; never recover again."""
+    def __init__(self, timeout, attempts):
+        self.timeout, self.attempts = timeout, attempts
+        super().__init__(f'No provider response within {timeout:g}s after {attempts} attempt(s). Task stopped.')
+
 class Connector:
     def __init__(self, settings, client):
         self.settings, self.client = settings, client
 
-    async def request(self, url, method, endpoint, body=None):
+    async def request(self, url, method, endpoint, body=None, *, response_timeout=None):
+        timeout = self.settings.provider_response_timeout if response_timeout is None else response_timeout
+        if timeout == 0:
+            raise ConnectorTimeout('No provider response within 0s.')
         try:
-            async with self.client.stream(method, url + endpoint, json=body, headers={
-                'Authorization': 'Bearer ' + self.api_key
-            } if self.api_key else {}) as response:
-                if response.status_code >= 400:
-                    raise ConnectorError(f'Connector returned HTTP {response.status_code}. Check the server configuration.')
-                data = bytearray()
-                async for chunk in response.aiter_bytes():
-                    data.extend(chunk)
-                    if len(data) > 8 * 1024 * 1024:
-                        raise ConnectorError('Connector response exceeds 8 MB')
+            # Unlimited requests disable every HTTPX deadline, including connect,
+            # and create no asyncio deadline. They remain externally cancellable.
+            # Finite deadlines use the task snapshot rather than client defaults.
+            deadline = nullcontext() if timeout == -1 else asyncio.timeout(timeout)
+            request_timeout = None if timeout == -1 else httpx.Timeout(timeout, connect=min(10, timeout))
+            async with deadline:
+                async with self.client.stream(method, url + endpoint, json=body,
+                    timeout=request_timeout, headers={
+                    'Authorization': 'Bearer ' + self.api_key
+                } if self.api_key else {}) as response:
+                    if response.status_code >= 400:
+                        raise ConnectorError(f'Connector returned HTTP {response.status_code}. Check the server configuration.')
+                    data = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        data.extend(chunk)
+                        if len(data) > 8 * 1024 * 1024:
+                            raise ConnectorError('Connector response exceeds 8 MB')
             return json.loads(data)
-        except httpx.TimeoutException:
-            raise ConnectorError('Connector request timed out. Your draft was restored.') from None
+        except (httpx.TimeoutException, TimeoutError):
+            raise ConnectorTimeout(f'No provider response within {timeout:g}s.') from None
         except httpx.HTTPError:
             raise ConnectorError('Cannot reach Connector. Start the server and check Connection settings.') from None
         except (ValueError, TypeError, RecursionError):
@@ -135,8 +158,8 @@ class Connector:
         import os
         return os.environ.get('CONNECTOR_API_KEY', '')
 
-    async def models(self, url):
-        data = await self.request(url, 'GET', '/models')
+    async def models(self, url, *, response_timeout=None):
+        data = await self.request(url, 'GET', '/models', response_timeout=response_timeout)
         if not isinstance(data, dict) or not isinstance(data.get('data'), list) or len(data['data']) > 1000:
             raise ConnectorError('Connector returned an invalid model list')
         models = {}
@@ -148,9 +171,9 @@ class Connector:
             models[id] = {'id': id, 'name': name if isinstance(name, str) and len(name) <= 200 else id}
         return list(models.values())
 
-    async def turn(self, url, model, messages, tools=None, validate_model=True):
+    async def turn(self, url, model, messages, tools=None, validate_model=True, *, response_timeout=None):
         if validate_model:
-            models = await self.models(url)
+            models = await self.models(url, response_timeout=response_timeout)
             if model not in {m['id'] for m in models}:
                 raise ConnectorError('Select an available Connector configuration')
         elif not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,199}', model):
@@ -164,7 +187,7 @@ class Connector:
             raise ConnectorError('Conversation contains invalid text or tool data') from None
         if oversized:
             raise ConnectorError('Conversation exceeds 16 MB. Start a new session.')
-        data = await self.request(url, 'POST', '/chat/completions', body)
+        data = await self.request(url, 'POST', '/chat/completions', body, response_timeout=response_timeout)
         try:
             message = data['choices'][0]['message']
             if not isinstance(message, dict) or message.get('role', 'assistant') != 'assistant':
@@ -182,8 +205,8 @@ class Connector:
         except (KeyError, IndexError, TypeError, ValueError):
             raise ConnectorError('Connector returned an invalid text completion') from None
 
-    async def complete(self, url, model, messages):
-        result = await self.turn(url, model, messages)
+    async def complete(self, url, model, messages, *, response_timeout=None):
+        result = await self.turn(url, model, messages, response_timeout=response_timeout)
         if result['tool_calls']:
             raise ConnectorError('This text client cannot execute tool calls. Select a text configuration.')
         return result['text']

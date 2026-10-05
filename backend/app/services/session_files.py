@@ -83,7 +83,7 @@ class SessionFiles:
                     step.update(status='cancelled', summary='Imported snapshot; execution is no longer active')
             if trace['status'] in ('queued', 'running'):
                 trace['status'] = 'cancelled'
-        if session.get('execution_state', {}).get('phase') in ('queued', 'running', 'checking', 'summarizing', 'recovering'):
+        if session.get('execution_state', {}).get('phase') in ('queued', 'running', 'checking', 'summarizing', 'recovering', 'retrying'):
             session['execution_state'] = {**session['execution_state'], 'phase': 'cancelled'}
         self.store.put('session', session)
         return self.ensure_project_file(session['id']) if project_id and persist else session

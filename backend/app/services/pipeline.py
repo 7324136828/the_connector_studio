@@ -1,5 +1,8 @@
 """Durable job ledger, cancellation, isolated output packaging and TTL cleanup."""
 import asyncio
+from copy import deepcopy
+from contextlib import nullcontext
+import inspect
 import hashlib
 import json
 import re
@@ -10,20 +13,56 @@ from uuid import uuid4
 from fastapi import HTTPException
 from ..repository import now
 from ..utils.temp_manager import TempManager
-from .connector import Connector, ConnectorError
+from .connector import Connector, ConnectorError, ConnectorTimeout, ProviderTimeoutExhausted
 from .agent_workers import AgentWorkers, AgentStopped
 from .task_context import EffortContext, parse_continue, CONTINUE_PROMPT, CONTINUE_WORK_PROMPT
 from .project_memory import memory_error_detail
 from . import lattice
 
 class DeadlineConnector:
-    """Apply a fresh deadline to each work, control and synthesis request."""
-    def __init__(self, connector, timeout):
-        self.connector, self.timeout = connector, timeout
+    """Retry only a timed-out provider request, never completed tool executions.
 
-    async def turn(self, *args, **kwargs):
-        async with asyncio.timeout(self.timeout):
-            return await self.connector.turn(*args, **kwargs)
+    Frozen messages and schemas are copied for every attempt. Model discovery
+    has its own bounded policy; after successful discovery POST retries do not
+    repeat that GET. External cancellation always propagates immediately.
+    """
+    def __init__(self, connector, timeout, retries=0, effort='low', on_retry=None):
+        self.connector, self.timeout = connector, timeout
+        self.retries = retries if effort != 'low' else 0
+        self.on_retry = on_retry
+
+    async def _request(self, method, *args, **kwargs):
+        frozen_args, frozen_kwargs = deepcopy(args), deepcopy(kwargs)
+        frozen_kwargs['response_timeout'] = self.timeout
+        for attempt in range(self.retries + 1):
+            # Observe cancellation before creating another provider request,
+            # even when an immediate MockTransport timeout did not yield.
+            await asyncio.sleep(0)
+            try:
+                if self.timeout == 0:
+                    raise ConnectorTimeout('No provider response within 0s.')
+                deadline = nullcontext() if self.timeout == -1 else asyncio.timeout(self.timeout)
+                async with deadline:
+                    return await method(*deepcopy(frozen_args), **deepcopy(frozen_kwargs))
+            except (ConnectorTimeout, httpx.TimeoutException, TimeoutError):
+                if attempt >= self.retries:
+                    raise ProviderTimeoutExhausted(self.timeout, attempt + 1) from None
+                if self.on_retry:
+                    result = self.on_retry(attempt + 1, self.retries, self.timeout)
+                    if inspect.isawaitable(result):
+                        await result
+
+    async def models(self, url):
+        return await self._request(self.connector.models, url)
+
+    async def turn(self, url, model, messages, tools=None, validate_model=True):
+        frozen_messages, frozen_tools = deepcopy(messages), deepcopy(tools)
+        if validate_model:
+            models = await self.models(url)
+            if model not in {item['id'] for item in models}:
+                raise ConnectorError('Select an available Connector configuration')
+        return await self._request(self.connector.turn, url, model, frozen_messages, frozen_tools,
+                                   validate_model=False)
 
 
 class Pipeline:
@@ -42,12 +81,24 @@ class Pipeline:
     def update(self, id, **changes):
         return self.store.update('job', id, lambda j: j.update(changes))
 
-    def new(self, session, kind, text=''):
+    def new(self, session, kind, text='', *, provider_policy=None):
         if kind != 'agent' and len(self.tasks) >= self.settings.max_jobs:
             raise HTTPException(429, 'Too many active jobs; wait for a request to finish')
+        if provider_policy is None:
+            if session.get('project_id'):
+                if not self.project_memory:
+                    raise ValueError('Project preferences are unavailable')
+                # The project file is authoritative. Read it before allocating
+                # a job; invalid/missing policy must never silently use globals.
+                preferences = self.project_memory.preferences(session['project_id'])
+                provider_policy = {key: preferences[key] for key in
+                                   ('provider_response_timeout', 'provider_timeout_retries')}
+            else:
+                provider_policy = self.settings.provider_policy()
         path = self.temp.create()
         job = {'id': str(uuid4()), 'session_id': session['id'], 'filename': session['title'], 'file_size': len(text.encode()), 'kind': kind, 'status': 'queued', 'progress': 0, 'created_at': now(), 'completed_at': None, 'error_message': None, 'logs': ['Job staged in an isolated system temporary folder.'], 'temp_dir': str(path), 'zip_path': None, 'submitted_text': text, 'download_available': False}
         job.update(project_id=session.get('project_id'), model=session.get('model', ''), effort=session.get('effort', 'low'), hidden=kind == 'agent')
+        job.update(provider_policy)
         job['enabled_tools'] = [definition['function']['name'] for definition in self.tool_definitions(job.get('project_id'), job['effort'], agent=kind == 'agent')]
         self.store.put('job', job)
         return job
@@ -155,8 +206,19 @@ class Pipeline:
                 if definition['function']['name'] in enabled
                 and not (agent and definition['function']['name'] == 'run_agent')]
 
+    def provider_connector(self, job, connector=None):
+        policy = self.settings.provider_policy(job)
+        def retry(attempt, limit, timeout):
+            text = f'No provider response within {timeout:g}s. Retrying request ({attempt}/{limit}).'
+            self.task_state(job, 'retrying', retry_attempt=attempt, retry_limit=limit,
+                            provider_response_timeout=timeout)
+            self.partial(job, text, kind='status')
+            self.store.update('job', job['id'], lambda current: current['logs'].append(text))
+        return DeadlineConnector(connector or self.connector, policy['provider_response_timeout'],
+                                 policy['provider_timeout_retries'], job.get('effort', 'low'), retry)
+
     async def conversation(self, job, url, connector, messages, agent=False, instructions=''):
-        connector = DeadlineConnector(connector, self.settings.request_timeout)
+        connector = self.provider_connector(job, connector)
         effort = job.get('effort', 'low')
         definitions = self.tool_definitions(job.get('project_id'), effort, agent, job.get('enabled_tools'))
         allowed = {definition['function']['name'] for definition in definitions}
@@ -192,9 +254,8 @@ class Pipeline:
 
         async def request(outbound):
             nonlocal first_request
-            async with asyncio.timeout(self.settings.request_timeout):
-                response = await connector.turn(url, job['model'], outbound, definitions or None,
-                                                validate_model=first_request)
+            response = await connector.turn(url, job['model'], outbound, definitions or None,
+                                            validate_model=first_request)
             first_request = False
             if not definitions and response['tool_calls']:
                 raise ConnectorError('This conversation cannot execute tool calls. Open a Work Project and enable its tools.')
@@ -276,6 +337,9 @@ class Pipeline:
                         self.trace(job, changes={'id': step_id, 'status': 'failed', 'completed_at': now(), 'result': result})
                         return {'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(result)}
                 context.extend(await asyncio.gather(*(execute(call, step_id) for call, step_id in prepared)))
+            except ProviderTimeoutExhausted:
+                # A configured timeout budget is terminal, including at Max.
+                raise
             except (ConnectorError, TimeoutError):
                 if effort != 'max' or context.recovery_used:
                     raise
@@ -294,7 +358,10 @@ class Pipeline:
         if len([job for job in self.store.list('job') if job.get('parent_job_id') == parent['id']]) >= 32:
             raise ValueError('This request reached its limit of 32 agent runs')
         slug = re.sub(r'[^A-Za-z0-9_-]+', '-', name.strip()).strip('-').lower()[:64]
-        if slug in self.store.get('job', parent['id']).get('stopped_agents', []):
+        parent_state = self.store.get('job', parent['id'])
+        if slug in parent_state.get('failed_agents', []):
+            raise ValueError('This agent exhausted its provider timeout retries; do not restart it during this task')
+        if slug in parent_state.get('stopped_agents', []):
             raise ValueError('This agent was stopped by the user; do not restart it during this task')
         if not slug:
             raise ValueError('Use an agent name containing letters or numbers')
@@ -314,7 +381,12 @@ class Pipeline:
                 'job_id': parent['id'], 'temp_dir': parent['temp_dir'], 'conversation': [],
                 'effort': 'max', 'multi_agent_enabled': True})
             definition = self.tool_runtime.agent(parent['project_id'], slug)
-        available = {item['id'] for item in await self.connector.models(url)}
+        try:
+            available = {item['id'] for item in await self.provider_connector(parent).models(url)}
+        except ProviderTimeoutExhausted:
+            self.store.update('job', parent['id'], lambda current: current.update(
+                failed_agents=list(dict.fromkeys([*current.get('failed_agents', []), slug]))))
+            raise
         requested = arguments.get('model') or definition.get('model') or parent['model']
         model = requested if requested in available else parent['model']
         if model not in available:
@@ -323,9 +395,10 @@ class Pipeline:
         child = self.session_files.update(child['id'], lambda current: current.update(
             is_agent=True, read_only=True, hidden=True, parent_session_id=parent['session_id'],
             agent_name=name, agent_task=task, agent_status='queued', model=model, effort=parent['effort']))
-        job = self.new(child, 'agent', task)
+        job = self.new(child, 'agent', task, provider_policy=self.settings.provider_policy(parent))
         job = self.update(job['id'], parent_job_id=parent['id'], parent_session_id=parent['session_id'],
-                          enabled_tools=[name for name in parent.get('enabled_tools', []) if name != 'run_agent'])
+                          enabled_tools=[name for name in parent.get('enabled_tools', []) if name != 'run_agent'],
+                          **self.settings.provider_policy(parent))
         child = self.session_files.update(child['id'], lambda current: current.update(
             pending_job=job['id'], messages=[{'role': 'user', 'author': 'Task', 'time': now(),
                                             'text': task, 'job_id': job['id']}]))
@@ -413,7 +486,7 @@ class Pipeline:
                 except Exception as error:
                     memory_problem = memory_error_detail(error)
                 session = self.session_files.update(session['id'], lambda current: current.update(memory_error=memory_problem))
-            logs = ['Text response received.']
+            logs = self.store.get('job', job['id'])['logs'] + ['Text response received.']
             if memory_problem:
                 logs.append(memory_problem)
             elif self.project_memory and project_id:
@@ -427,7 +500,8 @@ class Pipeline:
             self.package(job, session)
         except asyncio.CancelledError:
             self.restore(job)
-            self.update(job['id'], status='discarded', completed_at=now(), logs=['Request cancelled; execution stopped.'])
+            self.update(job['id'], status='discarded', completed_at=now(),
+                        logs=self.store.get('job', job['id'])['logs'] + ['Request cancelled; execution stopped.'])
             self.temp.purge(job['temp_dir'])
             raise
         except Exception as error:
@@ -439,7 +513,14 @@ class Pipeline:
             self.trace(job, status='failed')
             if agent:
                 self.session_files.update(job['session_id'], lambda session: session.update(agent_status='failed'))
-            self.update(job['id'], status='failed', error_message=detail, completed_at=now(), logs=[detail])
+            if isinstance(error, ProviderTimeoutExhausted):
+                self.update(job['id'], provider_timeout_exhausted=True)
+                if job.get('parent_job_id'):
+                    slug = re.sub(r'[^A-Za-z0-9_-]+', '-', current.get('agent_name', '').strip()).strip('-').lower()[:64]
+                    self.store.update('job', job['parent_job_id'], lambda parent: parent.update(
+                        failed_agents=list(dict.fromkeys([*parent.get('failed_agents', []), slug]))))
+            self.update(job['id'], status='failed', error_message=detail, completed_at=now(),
+                        logs=self.store.get('job', job['id'])['logs'] + [detail])
             self.temp.purge(job['temp_dir'])
 
     async def export(self, job, session):
@@ -462,7 +543,8 @@ class Pipeline:
             current = self.store.get('session', job['session_id'])
             if current.get('pending_job') == id:
                 self.restore(job)
-            self.update(id, status='discarded', completed_at=now(), logs=['Agent stopped by user.'])
+            self.update(id, status='discarded', completed_at=now(),
+                        logs=self.store.get('job', id)['logs'] + ['Agent stopped by user.'])
         task = self.tasks.get(id)
         if task:
             task.cancel()

@@ -70,6 +70,8 @@ class ConnectionInput(StrictModel):
     server_url: str = Field(min_length=1, max_length=2048)
     font_size: int = Field(default=14, ge=11, le=24)
     max_parallel_agents: int = Field(default=4, ge=1, le=16)
+    provider_response_timeout: float = Field(default=120, ge=1, le=3600, strict=True, allow_inf_nan=False)
+    provider_timeout_retries: int = Field(default=2, ge=0, le=10, strict=True)
 
 class ResourcePatch(StrictModel):
     effort: Effort = 'low'

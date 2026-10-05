@@ -61,7 +61,8 @@ before overwrite. Public session creation requires an existing project, and
 project sessions are saved immediately on creation or opening. Global session
 navigation and native upload/drop/paste import are removed; Explorer opens native
 files within a project. Legacy orphan records remain available for explicit
-association with a valid project, without creating new orphan sessions. Explorer files are validated and copied into the project's sessions
+association with a valid project, without creating new orphan sessions.
+Explorer files are validated and copied into the project's sessions
 folder when needed, leaving the source intact; files already in the sessions
 folder retain their name. Source and destination revisions prevent unrelated
 changes from being overwritten, and reopening a source preserves the current
@@ -121,12 +122,12 @@ cards and closing their tabs does not stop execution.
 
 Lattice v1 remains the default for ordinary conversations. Version 2 adds bounded,
 checksummed trace metadata and portable child snapshots with a fixed public field
-schema. Import assigns fresh parent/child IDs and remaps trace references; running
+schema. Opening external project session files assigns fresh parent/child IDs and remaps trace references; running
 snapshots become cancelled. Agent Task messages remain present in in-progress
 file snapshots. Parent exports include refreshed child data, so runs can be viewed
-after import without the original SQLite database. The original native v1 reader
+after project file opening without the original SQLite database. The original native v1 reader
 does not understand v2. Real-process tests cover parallel worker limits, model
-fallback, cancelled descendants, environment identity and portable trace imports;
+fallback, cancelled descendants, environment identity and portable trace files;
 browser tests cover trace expansion, read-only viewing and saved resources.
 
 
@@ -146,13 +147,14 @@ Token estimates are UTF-8 JSON bytes/3 plus message overhead, with tool schemas
 included. History trimming preserves complete tool-call/result groups. Synthesis
 sources are fragmented into bounded non-executable inputs, with recursive work
 limits, rather than sending oversized context during recovery. Max permits one
-summary-of-summaries recovery before reporting a second failure. Each connector
+summary-of-summaries recovery for other connector failures. Exhausted timeout
+retries are terminal and bypass that recovery. Each connector
 turn has its own deadline; cancelling checks or synthesis propagates immediately
 and prevents further continuation calls.
 
 Public partial updates and phases persist with the session and its child snapshots.
 Configuration attribution is captured per update, and duplicate final text is
-hidden in the UI without removing saved intermediate data. Imports terminalize
+hidden in the UI without removing saved intermediate data. Opening native files terminalizes
 active execution states and never resume tasks. Backend and browser tests cover
 strict yes/no controls, tools on every work/check turn, context compaction,
 recovery, cancel during checks/synthesis, individual child Stop, queued worker
@@ -187,3 +189,20 @@ Outbound work/check contexts are validated before dispatch and fail closed if
 that prompt is absent or changed. Regression tests capture connector requests at
 all non-Low efforts, including repeated identical prompts and multiline Unicode
 text, and verify retained tool definitions throughout continuation.
+
+
+Connection settings persist provider_response_timeout (finite seconds 1..3600,
+default 120) and provider_timeout_retries (integer 0..10, default 2). Task creation
+captures the policy; child agents inherit the parent's snapshot. Each timed-out
+provider turn may retry N times after its initial attempt at Medium or higher;
+Low never retries. A typed timeout distinguishes no-response failures from HTTP
+and malformed-response errors. The per-request HTTPX override and asynchronous
+deadline honor custom timeouts above the former fixed 120-second client value.
+Work, continuation checks, and synthesis all share this bounded retry adapter.
+Retries reuse frozen request messages/tool definitions and do not replay finished
+tools. Exhaustion stops the affected task without entering Max's generic recovery.
+A timed-out child cannot be restarted under the same name within that parent task.
+Retry phase, attempt/limit, public status, and terminal error persist in sessions;
+terminal history logs retain retry entries. Stop cancels active awaits and prevents
+another attempt. Settings, provider transport, cancellation, and parent/child
+regressions verify these paths with isolated local mocks.

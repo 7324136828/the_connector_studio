@@ -1,0 +1,1 @@
+Based on the code and some sort of documentation, can you provide a detailed summarization of the features/epic of the current project? Document everything in docs folder.

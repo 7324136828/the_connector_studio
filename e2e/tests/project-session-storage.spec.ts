@@ -110,6 +110,8 @@ test("opening a native file from another project stores a copy in project sessio
   const source: StoredSession = await sourceResponse.json();
   const draft = "Carry this saved draft into the project";
   expect((await page.request.patch("/api/sessions/" + source.id, { data: { draft, model: "test-config" } })).status()).toBe(200);
+  expect((await page.request.post("/api/sessions/" + source.id + "/save")).status()).toBe(200);
+  const sourceBytes = readFileSync(source.saved_path!);
   const download = await page.request.get("/api/sessions/" + source.id + "/download");
   expect(download.status()).toBe(200);
   const bytes = await download.body();
@@ -131,7 +133,7 @@ test("opening a native file from another project stores a copy in project sessio
   await expect(page.getByLabel("Message", { exact: true })).toHaveValue(draft);
   expect((await diskSession(page, path)).draft).toBe(draft);
   expect(readFileSync(join(project.path, "files", "portable-session.lattice"))).toEqual(bytes);
-  expect(readFileSync(source.saved_path!)).toEqual(bytes);
+  expect(readFileSync(source.saved_path!)).toEqual(sourceBytes);
 
   await page.reload();
   await selectRecentProject(page, project);

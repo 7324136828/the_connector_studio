@@ -44,6 +44,13 @@ def create_app(settings=None, transport=None):
     session_files = SessionFiles(settings, store, workspace, project_memory=project_memory)
     tool_runtime = ToolRuntime(settings, workspace)
 
+    def connection_settings():
+        connection = store.get('settings', 'connection')
+        policy = settings.provider_policy(connection)
+        if any(connection.get(key) != value for key, value in policy.items()):
+            return store.update('settings', 'connection', lambda current: current.update(settings.provider_policy(current)))
+        return connection
+
     @asynccontextmanager
     async def lifespan(application):
         store.initialize()
@@ -57,7 +64,8 @@ def create_app(settings=None, transport=None):
         try:
             settings.normalize_url(store.get('settings', 'connection')['server_url'])
         except HTTPException:
-            store.put('settings', {'id': 'connection', 'server_url': settings.connector_url, 'font_size': 14})
+            store.put('settings', {'id': 'connection', 'server_url': settings.connector_url, 'font_size': 14, 'max_parallel_agents': 4, **settings.provider_policy()})
+        connection_settings()
         async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout, connect=10), transport=transport, trust_env=False, follow_redirects=False) as client:
             pipeline = Pipeline(settings, store, Connector(settings, client), session_files, project_memory=project_memory, tool_runtime=tool_runtime, transport=transport)
             application.state.pipeline = pipeline
@@ -119,11 +127,11 @@ def create_app(settings=None, transport=None):
 
     @app.get('/api/settings')
     def get_settings():
-        return {'max_parallel_agents': 4, **store.get('settings', 'connection'), 'workspace_root': str(settings.workspace_root)}
+        return {'max_parallel_agents': 4, **connection_settings(), 'workspace_root': str(settings.workspace_root)}
 
     @app.post('/api/settings/test')
     async def test_connection(body: ConnectionInput):
-        return {'models': await app.state.connector.models(settings.normalize_url(body.server_url))}
+        return {'models': await app.state.connector.models(settings.normalize_url(body.server_url), response_timeout=body.provider_response_timeout)}
 
     @app.post('/api/settings')
     async def save_settings(body: ConnectionInput):
@@ -131,13 +139,14 @@ def create_app(settings=None, transport=None):
         if url != store.get('settings', 'connection')['server_url']:
             for id in list(app.state.pipeline.tasks):
                 await app.state.pipeline.discard(id)
-        result = store.put('settings', {'id': 'connection', 'server_url': url, 'font_size': body.font_size, 'max_parallel_agents': body.max_parallel_agents})
+        result = store.put('settings', {'id': 'connection', 'server_url': url, **body.model_dump(exclude={'server_url'})})
         app.state.pipeline.workers.wake()
         return result
 
     @app.get('/api/models')
     async def models():
-        return await app.state.connector.models(store.get('settings', 'connection')['server_url'])
+        connection = connection_settings()
+        return await app.state.connector.models(connection['server_url'], response_timeout=connection['provider_response_timeout'])
 
     @app.get('/api/projects')
     def projects():

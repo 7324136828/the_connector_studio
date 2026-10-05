@@ -32,6 +32,9 @@ export interface Session {
     iteration: number;
     context_tokens?: number;
     summary_count?: number;
+    retry_attempt?: number;
+    retry_limit?: number;
+    provider_response_timeout?: number;
     error?: string;
   };
   execution_traces?: ExecutionTraceRecord[];
@@ -115,6 +118,8 @@ export interface Resource {
 export interface Job {
   id: string;
   effort?: Effort;
+  provider_response_timeout?: number;
+  provider_timeout_retries?: number;
   session_id: string;
   filename: string;
   file_size: number;
@@ -133,6 +138,8 @@ export interface Connection {
   font_size: number;
   workspace_root: string;
   max_parallel_agents: number;
+  provider_response_timeout?: number;
+  provider_timeout_retries?: number;
 }
 export interface Model {
   id: string;

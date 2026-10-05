@@ -15,11 +15,11 @@ MAX_EXTENSION = 16 * 1024 * 1024
 MAX_LIVE_UPDATES = 1000
 MAX_LIVE_TEXT = 1024 * 1024
 EFFORT_LEVELS = {'low', 'medium', 'high', 'extra_high', 'max'}
-EXECUTION_PHASES = {'queued', 'running', 'checking', 'summarizing', 'recovering', 'completed', 'failed', 'cancelled'}
+EXECUTION_PHASES = {'queued', 'running', 'checking', 'summarizing', 'recovering', 'retrying', 'completed', 'failed', 'cancelled'}
 LIVE_UPDATE_REQUIRED = {'id', 'job_id', 'text', 'created_at', 'kind'}
 LIVE_UPDATE_KEYS = {*LIVE_UPDATE_REQUIRED, 'model'}
 MODEL_IDENTIFIER = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,199}')
-EXECUTION_STATE_KEYS = {'phase', 'iteration', 'context_tokens', 'summary_count', 'error'}
+EXECUTION_STATE_KEYS = {'phase', 'iteration', 'context_tokens', 'summary_count', 'error', 'retry_attempt', 'retry_limit', 'provider_response_timeout'}
 EXTENSION_KEYS = {'execution_traces', 'is_agent', 'read_only', 'hidden', 'parent_session_id', 'agent_name', 'agent_status', 'agent_task', 'agent_run_id', 'child_sessions', 'effort', 'live_updates', 'execution_state'}
 TRACE_KEYS = {'job_id', 'status', 'created_at', 'completed_at', 'steps'}
 STEP_KEYS = {'id', 'tool_name', 'arguments', 'result', 'status', 'started_at', 'completed_at', 'summary', 'agent_session_id', 'agent_name', 'model', 'error'}
@@ -120,6 +120,13 @@ def _extension(value, *, child=False, messages=None):
         for key in ('context_tokens', 'summary_count'):
             if key in state and (type(state[key]) is not int or not 0 <= state[key] <= 1000000000):
                 raise ValueError('Invalid execution state count')
+        for key in ('retry_attempt', 'retry_limit'):
+            if key in state and (type(state[key]) is not int or not 0 <= state[key] <= 10):
+                raise ValueError('Invalid execution retry count')
+        if 'provider_response_timeout' in state:
+            timeout = state['provider_response_timeout']
+            if type(timeout) not in (int, float) or not math.isfinite(timeout) or (timeout != -1 and timeout < 0):
+                raise ValueError('Invalid execution provider timeout')
         if 'error' in state and (not isinstance(state['error'], str) or len(state['error']) > 10000):
             raise ValueError('Invalid execution state error')
     traces = value.get('execution_traces', [])

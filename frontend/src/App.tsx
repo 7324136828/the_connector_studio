@@ -115,6 +115,8 @@ export default function App() {
     font_size: 14,
     workspace_root: "",
     max_parallel_agents: 4,
+    provider_response_timeout: 120,
+    provider_timeout_retries: 2,
   });
   const [settingsDraft, setSettingsDraft] = useState(connection);
   const [environmentState, setEnvironmentState] = useState<{
@@ -767,8 +769,14 @@ export default function App() {
   const showDialog = (next: Dialog) => {
     if (["project", "open", "file", "new-session"].includes(next)) {
       void guard(async () => {
-        const roots = await api<{ default_path: string }>("/filesystem/roots");
+        const [roots, recentProjects] = await Promise.all([
+          api<{ default_path: string }>("/filesystem/roots"),
+          next === "project"
+            ? api<Project[]>("/projects")
+            : Promise.resolve(null),
+        ]);
         setDefaultParentPath(roots.default_path);
+        if (recentProjects) setProjects(recentProjects);
         setDialog(next);
       });
       return;
@@ -842,6 +850,9 @@ export default function App() {
         server_url: settingsDraft.server_url,
         font_size: settingsDraft.font_size,
         max_parallel_agents: settingsDraft.max_parallel_agents,
+        provider_response_timeout:
+          settingsDraft.provider_response_timeout ?? 120,
+        provider_timeout_retries: settingsDraft.provider_timeout_retries ?? 2,
       });
       setConnection(settingsDraft);
       await loadModels();
@@ -1348,7 +1359,6 @@ export default function App() {
                             <div className="row-actions">
                               <button
                                 disabled={
-                                  !project &&
                                   !sessions.find(
                                     (session) => session.id === j.session_id,
                                   )?.project_id
@@ -1667,6 +1677,16 @@ export default function App() {
                     )}
                   </div>
                   <div className="composer-wrap">
+                    {active.execution_state?.phase === "failed" &&
+                      active.execution_state.error && (
+                        <p
+                          className="project-memory-error"
+                          data-testid="task-failure"
+                          role="alert"
+                        >
+                          {active.execution_state.error}
+                        </p>
+                      )}
                     {currentExecutionTrace && (
                       <ExecutionTrace
                         key={currentExecutionTrace.job_id}
@@ -2062,6 +2082,48 @@ export default function App() {
                 />
               </label>
               <p className="muted">Limit how many agents can work at once.</p>
+              <label>
+                Provider response timeout (seconds)
+                <input
+                  type="number"
+                  min={1}
+                  max={3600}
+                  step="any"
+                  required
+                  disabled={busy}
+                  value={settingsDraft.provider_response_timeout ?? 120}
+                  onChange={(e) =>
+                    setSettingsDraft({
+                      ...settingsDraft,
+                      provider_response_timeout: Number(e.target.value),
+                    })
+                  }
+                />
+              </label>
+              <label>
+                Timeout retries
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  step={1}
+                  required
+                  disabled={busy}
+                  value={settingsDraft.provider_timeout_retries ?? 2}
+                  onChange={(e) =>
+                    setSettingsDraft({
+                      ...settingsDraft,
+                      provider_timeout_retries: Number(e.target.value),
+                    })
+                  }
+                />
+              </label>
+              <p className="muted">
+                Retries follow the first timed-out attempt. Low effort stops
+                immediately; Medium and higher use these retries for
+                conversations and agents. Stop interrupts requests and retries.
+                Changes apply to new tasks.
+              </p>
               <fieldset className="environment-settings" disabled={busy}>
                 <legend>
                   Python environments
@@ -2163,6 +2225,10 @@ export default function App() {
                         font_size: settingsDraft.font_size,
                         max_parallel_agents:
                           settingsDraft.max_parallel_agents,
+                        provider_response_timeout:
+                          settingsDraft.provider_response_timeout ?? 120,
+                        provider_timeout_retries:
+                          settingsDraft.provider_timeout_retries ?? 2,
                       },
                     );
                     setNotice(

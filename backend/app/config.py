@@ -1,6 +1,7 @@
 """Runtime configuration; user data defaults outside the source checkout."""
 from dataclasses import dataclass, field
 import os
+import math
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -21,6 +22,8 @@ class Settings:
     job_ttl: int = field(default_factory=lambda: int(os.environ.get('JOB_TTL_SECONDS', '86400')))
     max_jobs: int = 4
     request_timeout: float = 120
+    provider_response_timeout: float = 120
+    provider_timeout_retries: int = 2
 
     def __post_init__(self):
         self.data_dir = self.data_dir.resolve()
@@ -35,7 +38,22 @@ class Settings:
         self.browser_roots = None if roots is None else tuple(dict.fromkeys(root.resolve() for root in roots))
         if self.job_ttl < 60:
             raise ValueError('JOB_TTL_SECONDS must be at least 60')
+        if type(self.provider_response_timeout) not in (int, float) or not 1 <= self.provider_response_timeout <= 3600 or not math.isfinite(self.provider_response_timeout):
+            raise ValueError('Provider response timeout must be between 1 and 3600 seconds')
+        if type(self.provider_timeout_retries) is not int or not 0 <= self.provider_timeout_retries <= 10:
+            raise ValueError('Provider timeout retries must be an integer between 0 and 10')
         self.connector_url = self.normalize_url(self.connector_url)
+
+    def provider_policy(self, connection=None):
+        """Normalize legacy persisted timeout fields without changing other settings."""
+        connection = connection or {}
+        timeout = connection.get('provider_response_timeout')
+        retries = connection.get('provider_timeout_retries')
+        if type(timeout) not in (int, float) or not 1 <= timeout <= 3600 or not math.isfinite(timeout):
+            timeout = self.provider_response_timeout
+        if type(retries) is not int or not 0 <= retries <= 10:
+            retries = self.provider_timeout_retries
+        return {'provider_response_timeout': timeout, 'provider_timeout_retries': retries}
 
     def normalize_url(self, value: str) -> str:
         url = urlsplit(value.strip())

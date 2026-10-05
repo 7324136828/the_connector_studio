@@ -133,14 +133,15 @@ test("Stop replaces Send at every effort and restores the submitted input", asyn
     await stop.click();
     expect((await stopped).status()).toBe(200);
     await expect(page.getByRole("button", { name: /Send$/ })).toBeVisible();
-    await expect(page.getByLabel("Message", { exact: true })).toHaveValue(
-      "slow",
-    );
     const current: Session = await (
       await page.request.get("/api/sessions/" + session.id)
     ).json();
     expect(current.pending_job).toBeNull();
     expect(current.messages).toHaveLength(0);
+    expect(current.draft, "cancelled draft at " + effort + " effort").toBe("slow");
+    await expect(page.getByLabel("Message", { exact: true })).toHaveValue(
+      "slow",
+    );
   }
 });
 

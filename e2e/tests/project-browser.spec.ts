@@ -319,7 +319,7 @@ test("New dialog tabs create project files and saved work sessions", async ({
   await page.getByRole("button", { name: "New Project", exact: true }).click();
   const dialog = page.getByTestId("new-item-dialog");
   await dialog.getByRole("tab", { name: "Sessions", exact: true }).click();
-  await dialog.getByLabel("Session name", { exact: true }).fill("Cannot be orphaned");
+  await expect(dialog.getByLabel("Session name", { exact: true })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
   await dialog.getByRole("tab", { name: "Projects", exact: true }).click();
   await expect(dialog.getByLabel("Parent folder", { exact: true })).toHaveValue(

@@ -246,7 +246,7 @@ class EffortPipelineTests(unittest.TestCase):
             if kind == 'probe':
                 return completion(json.dumps({'continue': 'yes' if counts[kind] < 3 else 'no'}))
             if counts[kind] == 2:
-                raise httpx.ReadTimeout('Fixture stalled after continuation')
+                raise httpx.RemoteProtocolError('Fixture failed after continuation')
             return completion('First public checkpoint.' if counts[kind] == 1 else 'Verified the original task after recovery.')
         self.handler = handler
         with self.small_context(6000):
@@ -275,7 +275,7 @@ class EffortPipelineTests(unittest.TestCase):
         self.assertEqual(session['live_updates'][0]['text'], 'The first public result.')
         self.assertEqual(session['execution_state']['phase'], 'failed')
 
-    def test_max_nonresponse_summarizes_then_no_stops_without_another_work_request(self):
+    def test_max_generic_failure_summarizes_then_no_stops_without_another_work_request(self):
         counts = {'work': 0, 'probe': 0, 'summary': 0}
         async def handler(body):
             kind = self.classification(body)
@@ -285,7 +285,7 @@ class EffortPipelineTests(unittest.TestCase):
             if kind == 'probe':
                 return completion(json.dumps({'continue': 'yes' if counts[kind] == 1 else 'no'}))
             if counts[kind] == 2:
-                raise httpx.ReadTimeout('Fixture connector stopped responding')
+                raise httpx.RemoteProtocolError('Fixture connector failed')
             return completion('First public candidate answer.')
         self.handler = handler
         job = self.wait(self.start('max')['id'])
@@ -377,14 +377,14 @@ class EffortPipelineTests(unittest.TestCase):
         self.assertEqual(self.current()['execution_traces'][0]['steps'][0]['status'], 'failed')
         self.assertIn('Enable the create_agent', self.current()['execution_traces'][0]['steps'][0]['result']['error'])
 
-    def test_max_recovery_can_continue_once_then_a_second_stall_fails(self):
+    def test_max_recovery_can_continue_once_then_a_second_generic_failure_fails(self):
         async def handler(body):
             kind = self.classification(body)
             if kind == 'summary':
                 return completion('A public recovery summary of the stalled task.')
             if kind == 'probe':
                 return completion('{"continue":"yes"}')
-            raise httpx.ReadTimeout('Fixture connector remains unavailable')
+            raise httpx.RemoteProtocolError('Fixture connector remains unavailable')
         self.handler = handler
         job = self.wait(self.start('max')['id'])
         self.assertEqual(job['status'], 'failed', job)
