@@ -1,7 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2023"],
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "allowImportingTsExtensions": true,
@@ -12,7 +15,13 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "skipLibCheck": true,
-    "types": ["node", "@playwright/test"]
+    "types": [
+      "node",
+      "@playwright/test"
+    ]
   },
-  "include": ["playwright.config.ts", "tests/**/*.ts"]
+  "include": [
+    "playwright.config.ts",
+    "tests/**/*.ts"
+  ]
 }

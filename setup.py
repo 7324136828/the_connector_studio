@@ -1,100 +1,52 @@
 #!/usr/bin/env python3
-"""Set up the Python backend, React frontend, and end-to-end tests."""
-
-from __future__ import annotations
-
+"""Provision the project virtual environment and build the React application."""
+import argparse
 import os
 import shutil
 import subprocess
 import sys
 import venv
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent
-BACKEND_REQUIREMENTS = ROOT / "backend" / "requirements.txt"
-FRONTEND = ROOT / "frontend"
-E2E = ROOT / "e2e"
-LOCAL_VENV = ROOT / ".venv"
-LOCAL_PYTHON = LOCAL_VENV / (
-    "Scripts/python.exe" if os.name == "nt" else "bin/python"
-)
-
+from script_runtime import ROOT, PYTHON, VENV
 
 class SetupError(RuntimeError):
-    """Raised when setup cannot be completed."""
+    pass
 
+def run(command, cwd=ROOT):
+    print('[setup] ' + ' '.join(map(str, command)), flush=True)
+    subprocess.run([str(p) for p in command], cwd=cwd, check=True)
 
-def in_active_environment() -> bool:
-    return (
-        sys.prefix != getattr(sys, "base_prefix", sys.prefix)
-        or bool(os.environ.get("VIRTUAL_ENV"))
-        or bool(os.environ.get("CONDA_PREFIX"))
-    )
-
-
-def run(command: list[str | Path], *, cwd: Path = ROOT) -> None:
-    rendered = [str(part) for part in command]
-    print(f"[setup] $ {' '.join(rendered)}", flush=True)
-    completed = subprocess.run(rendered, cwd=cwd, check=False)
-    if completed.returncode:
-        raise SetupError(
-            f"Command failed with exit code {completed.returncode}: "
-            f"{' '.join(rendered)}"
-        )
-
-
-def select_python() -> Path:
-    if in_active_environment():
-        print(f"[setup] Using active Python environment: {sys.prefix}")
-        return Path(sys.executable)
-
-    if not LOCAL_PYTHON.is_file():
-        print(f"[setup] Creating virtual environment at {LOCAL_VENV}")
-        venv.EnvBuilder(with_pip=True).create(LOCAL_VENV)
-    else:
-        print(f"[setup] Reusing virtual environment at {LOCAL_VENV}")
-    if not LOCAL_PYTHON.is_file():
-        raise SetupError(f"Virtual environment has no interpreter at {LOCAL_PYTHON}")
-    return LOCAL_PYTHON
-
-
-def seed_environment_file() -> None:
-    example = ROOT / ".env.example"
-    target = ROOT / ".env"
-    if example.is_file() and not target.exists():
-        shutil.copy2(example, target)
-        print("[setup] Created .env from .env.example")
-
-
-def main() -> int:
-    if sys.version_info < (3, 10):
-        raise SetupError("Python 3.10 or newer is required")
-    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
-    if npm is None:
-        raise SetupError("Node.js and npm were not found on PATH")
-    if not BACKEND_REQUIREMENTS.is_file():
-        raise SetupError(f"Requirements file not found: {BACKEND_REQUIREMENTS}")
-    if not (FRONTEND / "package.json").is_file():
-        raise SetupError(f"React project not found: {FRONTEND}")
-    if not (E2E / "package.json").is_file():
-        raise SetupError(f"End-to-end test project not found: {E2E}")
-
-    python = select_python()
-    print(f"[setup] Installing backend dependencies with {python}")
-    run([python, "-m", "pip", "install", "-r", BACKEND_REQUIREMENTS])
-    print("[setup] Installing frontend dependencies")
-    run([npm, "install"], cwd=FRONTEND)
-    print("[setup] Installing end-to-end test dependencies")
-    run([npm, "install"], cwd=E2E)
-    seed_environment_file()
-
-    print("\n[setup] Ready. Start the application with run.bat or ./run.sh")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--with-e2e', action='store_true', help='also install browser test dependencies')
+    args = parser.parse_args()
+    if sys.version_info < (3, 11):
+        raise SetupError('Python 3.11 or newer is required')
+    node = shutil.which('node')
+    npm = shutil.which('npm.cmd' if os.name == 'nt' else 'npm')
+    if not node or not npm:
+        raise SetupError('Install Node.js 22.12+ or 24+ with npm, then retry')
+    version = subprocess.check_output([node, '--version'], text=True).strip().lstrip('v')
+    major, minor, *_ = map(int, version.split('.'))
+    if major < 22 or (major == 22 and minor < 12):
+        raise SetupError('Node.js 22.12+ or 24+ is required')
+    if not PYTHON.is_file():
+        print('[setup] Creating ' + str(VENV), flush=True)
+        venv.EnvBuilder(with_pip=True).create(VENV)
+    run([PYTHON, '-m', 'pip', 'install', '--upgrade', 'pip'])
+    run([PYTHON, '-m', 'pip', 'install', '-r', ROOT / 'backend/requirements.lock.txt'])
+    for folder in ['frontend'] + (['e2e'] if args.with_e2e else []):
+        location = ROOT / folder
+        run([npm, 'ci' if (location / 'package-lock.json').is_file() else 'install'], location)
+    run([npm, 'run', 'typecheck'], ROOT / 'frontend')
+    run([npm, 'run', 'build'], ROOT / 'frontend')
+    if not (ROOT / '.env').exists():
+        shutil.copyfile(ROOT / '.env.example', ROOT / '.env')
+    print('[setup] Ready. Start with run.bat or bash run.sh. Use --production to serve the built UI.')
     return 0
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         raise SystemExit(main())
-    except SetupError as error:
-        print(f"\n[setup] ERROR: {error}", file=sys.stderr)
+    except (SetupError, subprocess.CalledProcessError, OSError) as error:
+        print('[setup] ERROR: ' + str(error), file=sys.stderr)
         raise SystemExit(1)

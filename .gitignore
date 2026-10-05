@@ -229,5 +229,18 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-original_project
-original-project
+
+# Local runtime configuration and generated artifacts
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+node_modules/
+*.db
+*.db-*
+
+# Project-local conversation memory contains user data.
+.memory/
+
+# Agent execution sessions contain project conversation data.
+.agent/runs/

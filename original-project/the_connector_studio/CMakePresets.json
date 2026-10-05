@@ -1,0 +1,30 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "windows-debug",
+      "displayName": "Connector Studio x64 Debug (Developer PowerShell)",
+      "generator": "Ninja",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "binaryDir": "${sourceDir}/build/cmake-debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON" }
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Connector Studio x64 Release (Developer PowerShell)",
+      "generator": "Ninja",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "binaryDir": "${sourceDir}/build/cmake-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-debug", "configurePreset": "windows-debug", "jobs": 2 },
+    { "name": "windows-release", "configurePreset": "windows-release", "jobs": 2 }
+  ],
+  "testPresets": [
+    { "name": "windows-debug", "configurePreset": "windows-debug", "output": { "outputOnFailure": true } },
+    { "name": "windows-release", "configurePreset": "windows-release", "output": { "outputOnFailure": true } }
+  ]
+}

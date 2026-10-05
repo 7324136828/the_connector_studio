@@ -1,0 +1,1 @@
+Can we keep the execution trace within the conversation and for new conversation being sent, it will have the current active execution near the user input?
