@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Effort = Literal['low', 'medium', 'high', 'extra_high', 'max']
 
@@ -70,8 +70,29 @@ class ConnectionInput(StrictModel):
     server_url: str = Field(min_length=1, max_length=2048)
     font_size: int = Field(default=14, ge=11, le=24)
     max_parallel_agents: int = Field(default=4, ge=1, le=16)
-    provider_response_timeout: float = Field(default=120, ge=1, le=3600, strict=True, allow_inf_nan=False)
+
+class ProviderPolicyFields(StrictModel):
+    provider_response_timeout: float = Field(default=-1, strict=True, allow_inf_nan=False)
     provider_timeout_retries: int = Field(default=2, ge=0, le=10, strict=True)
+
+    @field_validator('provider_response_timeout')
+    @classmethod
+    def timeout_range(cls, value):
+        if value != -1 and value < 0:
+            raise ValueError('Use -1 for unlimited or finite non-negative seconds')
+        return value
+
+class ConnectionTestInput(ConnectionInput):
+    project_id: str | None = Field(default=None, min_length=1, max_length=200)
+    provider_response_timeout: float = Field(default=-1, strict=True, allow_inf_nan=False)
+
+    @field_validator('provider_response_timeout')
+    @classmethod
+    def timeout_range(cls, value):
+        return ProviderPolicyFields.timeout_range(value)
+
+class ProjectPreferencesPatch(ProviderPolicyFields):
+    pass
 
 class ResourcePatch(StrictModel):
     effort: Effort = 'low'
@@ -83,7 +104,7 @@ class FileInput(StrictModel):
     name: str = Field(min_length=1, max_length=100)
     content: str = Field(default='', max_length=1000000)
 
-class ProjectMemoryPreferences(StrictModel):
+class ProjectMemoryPreferences(ProviderPolicyFields):
     version: Literal[1] = 1
     default_model: str = Field(default='', max_length=200, pattern=r'^(?:[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,199})?$')
 

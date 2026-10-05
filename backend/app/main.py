@@ -9,9 +9,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from .config import Settings, ROOT
+from .config import Settings, ROOT, valid_provider_timeout
 from .repository import Store, now
-from .schemas.studio import ProjectInput, OpenProject, SessionInput, SessionPatch, MessageInput, ConnectionInput, ResourcePatch, FileInput, FolderInput, FilesystemRoots, FilesystemListing, OpenSessionFile, SessionOpenInput, EnvironmentInput, Effort
+from .schemas.studio import ProjectInput, OpenProject, SessionInput, SessionPatch, MessageInput, ConnectionInput, ConnectionTestInput, ProjectPreferencesPatch, ResourcePatch, FileInput, FolderInput, FilesystemRoots, FilesystemListing, OpenSessionFile, SessionOpenInput, EnvironmentInput, Effort
 from .services.workspace import Workspace
 from .services.session_files import SessionFiles
 from .services.project_memory import ProjectMemory, memory_error_detail
@@ -46,10 +46,16 @@ def create_app(settings=None, transport=None):
 
     def connection_settings():
         connection = store.get('settings', 'connection')
-        policy = settings.provider_policy(connection)
-        if any(connection.get(key) != value for key, value in policy.items()):
-            return store.update('settings', 'connection', lambda current: current.update(settings.provider_policy(current)))
-        return connection
+        return {key: value for key, value in connection.items() if key not in ('provider_response_timeout', 'provider_timeout_retries')}
+
+    def initialize_project_preferences(project):
+        if project.get('provider_policy_initialized'):
+            return project_memory.preferences(project['id'])
+        migration = store.get('settings', 'project_provider_policy_migration')
+        legacy = migration['policy'] if project['id'] in migration['project_ids'] else None
+        preferences = project_memory.initialize(project['id'], legacy_policy=legacy)
+        store.update('project', project['id'], lambda current: current.update(provider_policy_initialized=True))
+        return preferences
 
     @asynccontextmanager
     async def lifespan(application):
@@ -64,8 +70,26 @@ def create_app(settings=None, transport=None):
         try:
             settings.normalize_url(store.get('settings', 'connection')['server_url'])
         except HTTPException:
-            store.put('settings', {'id': 'connection', 'server_url': settings.connector_url, 'font_size': 14, 'max_parallel_agents': 4, **settings.provider_policy()})
-        connection_settings()
+            store.put('settings', {'id': 'connection', 'server_url': settings.connector_url, 'font_size': 14, 'max_parallel_agents': 4})
+        try:
+            store.get('settings', 'project_provider_policy_migration')
+        except HTTPException as error:
+            if error.status_code != 404:
+                raise
+            connection = store.get('settings', 'connection')
+            legacy = {}
+            if valid_provider_timeout(connection.get('provider_response_timeout')):
+                legacy['provider_response_timeout'] = connection['provider_response_timeout']
+            retries = connection.get('provider_timeout_retries')
+            if type(retries) is int and 0 <= retries <= 10:
+                legacy['provider_timeout_retries'] = retries
+            store.put('settings', {'id': 'project_provider_policy_migration', 'policy': legacy,
+                                   'project_ids': [project['id'] for project in store.list('project')]})
+        for project in store.list('project'):
+            try:
+                initialize_project_preferences(project)
+            except (OSError, ValueError, HTTPException):
+                pass  # Existing invalid or unavailable preference files are preserved.
         async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout, connect=10), transport=transport, trust_env=False, follow_redirects=False) as client:
             pipeline = Pipeline(settings, store, Connector(settings, client), session_files, project_memory=project_memory, tool_runtime=tool_runtime, transport=transport)
             application.state.pipeline = pipeline
@@ -130,8 +154,13 @@ def create_app(settings=None, transport=None):
         return {'max_parallel_agents': 4, **connection_settings(), 'workspace_root': str(settings.workspace_root)}
 
     @app.post('/api/settings/test')
-    async def test_connection(body: ConnectionInput):
-        return {'models': await app.state.connector.models(settings.normalize_url(body.server_url), response_timeout=body.provider_response_timeout)}
+    async def test_connection(body: ConnectionTestInput):
+        timeout = body.provider_response_timeout
+        if body.project_id:
+            workspace.path(body.project_id)
+            if 'provider_response_timeout' not in body.model_fields_set:
+                timeout = project_memory.preferences(body.project_id)['provider_response_timeout']
+        return {'models': await app.state.connector.models(settings.normalize_url(body.server_url), response_timeout=timeout)}
 
     @app.post('/api/settings')
     async def save_settings(body: ConnectionInput):
@@ -144,9 +173,9 @@ def create_app(settings=None, transport=None):
         return result
 
     @app.get('/api/models')
-    async def models():
-        connection = connection_settings()
-        return await app.state.connector.models(connection['server_url'], response_timeout=connection['provider_response_timeout'])
+    async def models(project_id: str | None = Query(default=None, min_length=1, max_length=200)):
+        timeout = project_memory.preferences(project_id)['provider_response_timeout'] if project_id else -1
+        return await app.state.connector.models(connection_settings()['server_url'], response_timeout=timeout)
 
     @app.get('/api/projects')
     def projects():
@@ -166,7 +195,7 @@ def create_app(settings=None, transport=None):
 
     def project_details(project):
         try:
-            preferences = project_memory.initialize(project['id'])
+            preferences = initialize_project_preferences(project)
             return {**project, **preferences, 'memory_error': None}
         except Exception as error:
             return {**project, 'default_model': '', 'memory_error': memory_error_detail(error)}
@@ -194,9 +223,14 @@ def create_app(settings=None, transport=None):
     def project_preferences(id: str):
         store.get('project', id)
         try:
-            return {'project_id': id, **project_memory.initialize(id), 'error': None}
+            return {'project_id': id, **project_memory.preferences(id), 'error': None}
         except Exception as error:
             return {'project_id': id, 'default_model': '', 'error': memory_error_detail(error)}
+
+    @app.patch('/api/projects/{id}/preferences')
+    def update_project_preferences(id: str, body: ProjectPreferencesPatch):
+        workspace.path(id)
+        return {'project_id': id, **project_memory.set_preferences(id, **body.model_dump(exclude_unset=True)), 'error': None}
 
     @app.get('/api/projects/{id}/memory')
     def memory(id: str):
@@ -323,7 +357,7 @@ def create_app(settings=None, transport=None):
             session = session_files.update(id, mutate)
             return remember_configuration(session, changes['model']) if 'model' in changes else session
 
-    def remember_configuration(session, model):
+    def remember_configuration(session, model, *, required=False):
         if not session.get('project_id'):
             return session
         try:
@@ -331,6 +365,9 @@ def create_app(settings=None, transport=None):
             error = None
         except Exception as problem:
             error = memory_error_detail(problem)
+            if required:
+                session_files.update(session['id'], lambda current: current.update(memory_error=error))
+                raise HTTPException(409, error) from None
         return session_files.update(session['id'], lambda current: current.update(memory_error=error))
 
     @app.post('/api/sessions/{id}/save')
@@ -358,7 +395,7 @@ def create_app(settings=None, transport=None):
             effort = body.effort or session.get('effort', 'low')
             if effort != session.get('effort', 'low') or effort != 'max':
                 disable_multi_agent(session.get('project_id'))
-            selected = remember_configuration(session, body.model)
+            selected = remember_configuration(session, body.model, required=True)
             selected = {**selected, 'effort': effort}
             job = pipeline.new({**selected, 'model': body.model}, 'chat', body.text)
             def submit(session):

@@ -7,6 +7,15 @@ from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
+def valid_provider_timeout(value):
+    if type(value) not in (int, float) or (value != -1 and value < 0):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
 def data_home() -> Path:
     if os.name == 'nt':
         return Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData/Local')) / 'ConnectorStudioWeb'
@@ -22,7 +31,7 @@ class Settings:
     job_ttl: int = field(default_factory=lambda: int(os.environ.get('JOB_TTL_SECONDS', '86400')))
     max_jobs: int = 4
     request_timeout: float = 120
-    provider_response_timeout: float = 120
+    provider_response_timeout: float = -1
     provider_timeout_retries: int = 2
 
     def __post_init__(self):
@@ -38,8 +47,8 @@ class Settings:
         self.browser_roots = None if roots is None else tuple(dict.fromkeys(root.resolve() for root in roots))
         if self.job_ttl < 60:
             raise ValueError('JOB_TTL_SECONDS must be at least 60')
-        if type(self.provider_response_timeout) not in (int, float) or not 1 <= self.provider_response_timeout <= 3600 or not math.isfinite(self.provider_response_timeout):
-            raise ValueError('Provider response timeout must be between 1 and 3600 seconds')
+        if not valid_provider_timeout(self.provider_response_timeout):
+            raise ValueError('Provider response timeout must be -1 for unlimited or a finite non-negative number of seconds')
         if type(self.provider_timeout_retries) is not int or not 0 <= self.provider_timeout_retries <= 10:
             raise ValueError('Provider timeout retries must be an integer between 0 and 10')
         self.connector_url = self.normalize_url(self.connector_url)
@@ -49,7 +58,7 @@ class Settings:
         connection = connection or {}
         timeout = connection.get('provider_response_timeout')
         retries = connection.get('provider_timeout_retries')
-        if type(timeout) not in (int, float) or not 1 <= timeout <= 3600 or not math.isfinite(timeout):
+        if not valid_provider_timeout(timeout):
             timeout = self.provider_response_timeout
         if type(retries) is not int or not 0 <= retries <= 10:
             retries = self.provider_timeout_retries

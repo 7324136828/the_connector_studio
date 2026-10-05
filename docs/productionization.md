@@ -191,13 +191,23 @@ all non-Low efforts, including repeated identical prompts and multiline Unicode
 text, and verify retained tool definitions throughout continuation.
 
 
-Connection settings persist provider_response_timeout (finite seconds 1..3600,
-default 120) and provider_timeout_retries (integer 0..10, default 2). Task creation
-captures the policy; child agents inherit the parent's snapshot. Each timed-out
+Project `.memory/preferences.json` persists provider_response_timeout (-1 or
+finite non-negative seconds, default -1) and provider_timeout_retries (integer
+0..10, default 2), preserving default_model during policy/model mutations.
+GET/PATCH project preferences exposes the policy; global connection settings
+contain the server URL, font size, and concurrency. Existing catalog entries
+without policy fields migrate their former valid global policy once, while new
+projects use independent defaults. Missing/corrupt/unwritable preferences block
+new task creation before temporary job allocation. Task creation captures the
+project policy; child agents inherit the parent's snapshot. Each timed-out
 provider turn may retry N times after its initial attempt at Medium or higher;
 Low never retries. A typed timeout distinguishes no-response failures from HTTP
 and malformed-response errors. The per-request HTTPX override and asynchronous
-deadline honor custom timeouts above the former fixed 120-second client value.
+deadline honor finite custom values without an upper cap. Timeout -1 removes
+all HTTPX timeouts (including connect, read, write, and pool) and asynchronous
+deadlines, while task cancellation remains active. Timeout 0 fails immediately
+without sending a provider request; other negative or non-finite values are
+rejected.
 Work, continuation checks, and synthesis all share this bounded retry adapter.
 Retries reuse frozen request messages/tool definitions and do not replay finished
 tools. Exhaustion stops the affected task without entering Max's generic recovery.

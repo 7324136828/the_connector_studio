@@ -90,7 +90,7 @@ test("managed environment selection and concurrency persist, and Python stdout i
     name: "Connection settings",
     exact: true,
   });
-  await expect(dialog.locator("legend")).toContainText(project.name);
+  await expect(dialog.locator("legend").filter({ hasText: "Python environments" })).toContainText(project.name);
   const concurrency = dialog.getByLabel("Maximum parallel agents", {
     exact: true,
   });

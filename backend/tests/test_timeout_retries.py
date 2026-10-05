@@ -24,6 +24,63 @@ TOOLS = [{'type': 'function', 'function': {'name': 'inspect', 'parameters': {'ty
 
 
 class DeadlineConnectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unlimited_disables_all_httpx_and_asyncio_deadlines(self):
+        requests = []
+        async def respond(request):
+            requests.append(request)
+            await asyncio.sleep(.02)
+            if request.url.path.endswith('/models'):
+                return httpx.Response(200, json={'data': [{'id': 'test-config'}]})
+            return fixtures.completion('Unlimited response arrived.')
+        async with httpx.AsyncClient(timeout=.001, transport=httpx.MockTransport(respond)) as client:
+            connector = Connector(SimpleNamespace(provider_response_timeout=-1), client)
+            adapter = DeadlineConnector(connector, -1, 2, 'medium')
+            with patch('backend.app.services.connector.asyncio.timeout', side_effect=AssertionError('unlimited created a deadline')):
+                result = await adapter.turn(URL, 'test-config', [{'role': 'user', 'text': ORIGINAL}], TOOLS)
+        self.assertEqual(result['text'], 'Unlimited response arrived.')
+        self.assertEqual(len(requests), 2)
+        for request in requests:
+            self.assertEqual(request.extensions['timeout'],
+                             {'connect': None, 'read': None, 'write': None, 'pool': None})
+
+    async def test_unlimited_request_still_cancels_without_retries(self):
+        entered = asyncio.Event()
+        requests, retries = [], []
+        async def respond(request):
+            requests.append(request)
+            entered.set()
+            await asyncio.sleep(30)
+            return fixtures.completion('Must not finish after Stop.')
+        async with httpx.AsyncClient(timeout=.001, transport=httpx.MockTransport(respond)) as client:
+            connector = Connector(SimpleNamespace(provider_response_timeout=-1), client)
+            adapter = DeadlineConnector(connector, -1, 10, 'max', lambda *event: retries.append(event))
+            task = asyncio.create_task(adapter.turn(URL, 'test-config', [{'role': 'user', 'text': ORIGINAL}], validate_model=False))
+            await asyncio.wait_for(entered.wait(), 1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(retries, [])
+
+    async def test_zero_is_deterministic_before_transport_even_for_immediate_responses(self):
+        requests, retries = [], []
+        async def respond(request):
+            requests.append(request)
+            return fixtures.completion('An immediate fixture response must not win a zero deadline.')
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            connector = Connector(SimpleNamespace(provider_response_timeout=-1), client)
+            with self.assertRaises(ConnectorTimeout):
+                await connector.models(URL, response_timeout=0)
+            for effort in ('low', 'medium', 'high', 'extra_high', 'max'):
+                with self.subTest(effort=effort):
+                    retries.clear()
+                    adapter = DeadlineConnector(connector, 0, 2, effort, lambda *event: retries.append(event))
+                    with self.assertRaises(ProviderTimeoutExhausted) as error:
+                        await adapter.turn(URL, 'test-config', [{'role': 'user', 'text': ORIGINAL}], validate_model=False)
+                    self.assertEqual(error.exception.attempts, 1 if effort == 'low' else 3)
+                    self.assertEqual(len(retries), 0 if effort == 'low' else 2)
+        self.assertEqual(requests, [])
+
     async def test_each_effort_has_exact_timeout_attempt_budget_and_immutable_payload(self):
         for effort in ('low', 'medium', 'high', 'extra_high', 'max'):
             with self.subTest(effort=effort):
@@ -138,6 +195,81 @@ class TimeoutPipelineTests(unittest.TestCase):
     def configure(self, timeout=1.25, retries=2):
         return self.app.state.project_memory.set_preferences(self.project['id'],
             provider_response_timeout=timeout, provider_timeout_retries=retries)
+
+    def test_new_jobs_default_to_unlimited_project_policy_and_ignore_global_settings(self):
+        self.app.state.store.update('settings', 'connection', lambda settings: settings.update(
+            provider_response_timeout=0, provider_timeout_retries=0))
+        job = self.wait(self.start('medium', ORIGINAL)['id'])
+        self.assertEqual(job['status'], 'completed', job)
+        self.assertEqual(job['provider_response_timeout'], -1)
+        self.assertEqual(job['provider_timeout_retries'], 2)
+        self.assertEqual([self.classification(body) for body in self.requests], ['work', 'probe'])
+        self.assert_public_and_enabled_tools(ORIGINAL)
+
+    def test_zero_project_timeout_exhausts_immediately_without_provider_requests(self):
+        self.configure(timeout=0, retries=2)
+        job = self.wait(self.start('medium', ORIGINAL)['id'])
+        self.assertEqual(job['status'], 'failed', job)
+        self.assertTrue(job['provider_timeout_exhausted'])
+        self.assertEqual(job['provider_response_timeout'], 0)
+        self.assertEqual(self.requests, [])
+        self.assertIn('within 0s after 3 attempt(s)', job['error_message'])
+        session = self.current()
+        self.assertEqual(session['draft'], ORIGINAL)
+        self.assertEqual(session['execution_state']['retry_attempt'], 2)
+        self.assertEqual(session['execution_state']['provider_response_timeout'], 0)
+        self.assertEqual(lattice.decode(Path(session['saved_path']).read_bytes())['execution_state'], session['execution_state'])
+
+    def test_unlimited_active_request_stops_and_restores_original_draft(self):
+        self.configure(timeout=-1, retries=10)
+        entered = threading.Event()
+        async def handler(body):
+            entered.set()
+            await asyncio.sleep(30)
+            return fixtures.completion('Must not return after Stop.')
+        self.handler = handler
+        started = self.start('max', ORIGINAL)
+        self.assertTrue(entered.wait(4))
+        response = self.client.post('/api/jobs/' + started['id'] + '/discard')
+        self.assertEqual(response.status_code, 200, response.text)
+        job = self.wait(started['id'])
+        self.assertEqual(job['status'], 'discarded', job)
+        self.assertEqual(job['provider_response_timeout'], -1)
+        self.assertEqual(len(self.requests), 1)
+        self.assertFalse(any('Retrying request' in line for line in job['logs']))
+        self.assertEqual(self.current()['draft'], ORIGINAL)
+        self.assertIsNone(self.current()['pending_job'])
+
+    def test_unbounded_finite_project_timeout_is_captured_without_clamping(self):
+        self.configure(timeout=10 ** 12, retries=0)
+        job = self.wait(self.start('medium', ORIGINAL)['id'])
+        self.assertEqual(job['status'], 'completed', job)
+        self.assertEqual(job['provider_response_timeout'], 10 ** 12)
+        self.assertEqual(job['provider_timeout_retries'], 0)
+        self.assert_public_and_enabled_tools(ORIGINAL)
+
+    def test_unreadable_project_policy_refuses_new_job_before_temp_allocation(self):
+        pipeline = self.app.state.pipeline
+        before_jobs = len(self.app.state.store.list('job'))
+        before_temp = set(pipeline.temp.root.glob('job-*'))
+        with patch.object(self.app.state.project_memory, 'preferences', side_effect=ValueError('Preferences are unreadable')):
+            with self.assertRaisesRegex(ValueError, 'unreadable'):
+                pipeline.new(self.session, 'chat', ORIGINAL)
+        self.assertEqual(len(self.app.state.store.list('job')), before_jobs)
+        self.assertEqual(set(pipeline.temp.root.glob('job-*')), before_temp)
+
+    def test_child_capture_does_not_reread_changed_or_missing_project_policy(self):
+        self.configure(timeout=.25, retries=3)
+        pipeline = self.app.state.pipeline
+        parent = pipeline.new({**self.session, 'model': 'test-config', 'effort': 'max'}, 'chat', ORIGINAL)
+        child = self.app.state.session_files.new('Captured child', self.project['id'], persist=False)
+        with patch.object(self.app.state.project_memory, 'preferences', side_effect=ValueError('file removed during parent task')):
+            child_job = pipeline.new(child, 'agent', 'Captured child task', provider_policy=self.app.state.settings.provider_policy(parent))
+        self.assertEqual(child_job['provider_response_timeout'], .25)
+        self.assertEqual(child_job['provider_timeout_retries'], 3)
+        # Remove these fixture-only staged jobs from active recovery tracking.
+        pipeline.update(parent['id'], status='failed')
+        pipeline.update(child_job['id'], status='failed')
 
     def test_all_efforts_stop_at_timeout_exhaustion_without_extra_max_recovery(self):
         self.configure()

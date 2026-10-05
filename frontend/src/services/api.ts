@@ -82,6 +82,8 @@ export interface Project {
 export interface ProjectPreferences {
   project_id: string;
   default_model: string;
+  provider_response_timeout?: number;
+  provider_timeout_retries?: number;
   error: string | null;
 }
 export interface ProjectEnvironments {
@@ -138,8 +140,6 @@ export interface Connection {
   font_size: number;
   workspace_root: string;
   max_parallel_agents: number;
-  provider_response_timeout?: number;
-  provider_timeout_retries?: number;
 }
 export interface Model {
   id: string;

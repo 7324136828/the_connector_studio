@@ -69,7 +69,7 @@ class ProjectMemory:
             memory = self.workspace.memory_path(project_id)
         return memory
 
-    def _read_json(self, path, model, maximum):
+    def _read_json(self, path, model, maximum, *, with_fields=False):
         if not path.is_file():
             raise ValueError('Project memory contains an incompatible file or folder')
         with path.open('rb') as file:
@@ -85,7 +85,8 @@ class ProjectMemory:
             return result
         try:
             document = json.loads(data.decode('utf-8'), object_pairs_hook=unique_keys)
-            return model.model_validate(document).model_dump()
+            validated = model.model_validate(document).model_dump()
+            return (validated, set(document)) if with_fields else validated
         except (ValueError, TypeError, ValidationError):
             raise ValueError('Project memory file has an invalid or incompatible format') from None
 
@@ -112,41 +113,57 @@ class ProjectMemory:
         finally:
             staging.unlink(missing_ok=True)
 
+    def _preferences_document(self, path, *, require_policy=True):
+        if not path.exists():
+            raise ValueError('Project preferences are missing. Restore .memory/preferences.json before starting a task.')
+        document, fields = self._read_json(path, ProjectMemoryPreferences, MAX_PREFERENCES_BYTES, with_fields=True)
+        if require_policy and not {'provider_response_timeout', 'provider_timeout_retries'} <= fields:
+            raise ValueError('Project timeout policy is missing. Restore the timeout and retry settings in .memory/preferences.json before starting a task.')
+        if _redact(document['default_model']) != document['default_model']:
+            raise ValueError('Project memory contains an invalid configuration identifier')
+        return document, fields
+
     def preferences(self, project_id):
         with self.lock(project_id):
             memory = self._directory(project_id)
-            path = self._child(memory, 'preferences.json')
-            if not path.exists():
-                return {'default_model': ''}
-            document = self._read_json(path, ProjectMemoryPreferences, MAX_PREFERENCES_BYTES)
-            if _redact(document['default_model']) != document['default_model']:
-                raise ValueError('Project memory contains an invalid configuration identifier')
-            return {'default_model': document['default_model']}
+            document, _ = self._preferences_document(self._child(memory, 'preferences.json'))
+            return document
 
-    def initialize(self, project_id):
+    def initialize(self, project_id, legacy_policy=None):
+        """Explicitly initialize new projects or migrate missing legacy policy fields."""
         with self.lock(project_id):
-            preferences = self.preferences(project_id)
             memory = self._directory(project_id, create=True)
             path = self._child(memory, 'preferences.json')
+            if path.exists():
+                document, fields = self._preferences_document(path, require_policy=False)
+            else:
+                document, fields = ProjectMemoryPreferences().model_dump(), set()
+            for key in ('provider_response_timeout', 'provider_timeout_retries'):
+                if key not in fields and legacy_policy and key in legacy_policy:
+                    document[key] = legacy_policy[key]
+            document = ProjectMemoryPreferences.model_validate(document).model_dump()
             if not path.exists():
-                document = ProjectMemoryPreferences(**preferences).model_dump()
                 self._atomic_create(path, self._encode(document, MAX_PREFERENCES_BYTES))
-            return preferences
+            elif not {'provider_response_timeout', 'provider_timeout_retries'} <= fields:
+                atomic_write(path, self._encode(document, MAX_PREFERENCES_BYTES))
+            return document
+
+    def set_preferences(self, project_id, **changes):
+        if set(changes) - {'default_model', 'provider_response_timeout', 'provider_timeout_retries'}:
+            raise ValueError('Unsupported project preference field')
+        if 'default_model' in changes:
+            model = changes['default_model']
+            if not isinstance(model, str) or not MODEL_PATTERN.fullmatch(model) or _redact(model) != model:
+                raise ValueError('Choose a valid Connector configuration identifier')
+        with self.lock(project_id):
+            current = self.preferences(project_id)
+            document = ProjectMemoryPreferences.model_validate({**current, **changes}).model_dump()
+            path = self._child(self._directory(project_id), 'preferences.json')
+            atomic_write(path, self._encode(document, MAX_PREFERENCES_BYTES))
+            return document
 
     def set_default_model(self, project_id, model):
-        if not isinstance(model, str) or not MODEL_PATTERN.fullmatch(model) or _redact(model) != model:
-            raise ValueError('Choose a valid Connector configuration identifier')
-        with self.lock(project_id):
-            self.preferences(project_id)  # Validate file-authoritative state before writing.
-            memory = self._directory(project_id, create=True)
-            path = self._child(memory, 'preferences.json')
-            document = ProjectMemoryPreferences(default_model=model).model_dump()
-            data = self._encode(document, MAX_PREFERENCES_BYTES)
-            if path.exists():
-                atomic_write(path, data)
-            else:
-                self._atomic_create(path, data)
-            return {'default_model': model}
+        return self.set_preferences(project_id, default_model=model)
 
     def _uuid(self, value):
         try:
@@ -172,7 +189,7 @@ class ProjectMemory:
         if not isinstance(model, str) or not MODEL_PATTERN.fullmatch(model) or not model or _redact(model) != model:
             raise ValueError('Choose a valid Connector configuration identifier')
         with self.lock(project_id):
-            self.initialize(project_id)
+            self.preferences(project_id)
             memory = self._directory(project_id)
             interactions = self._child(memory, 'interactions')
             interactions.mkdir(exist_ok=True)

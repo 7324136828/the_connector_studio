@@ -188,7 +188,7 @@ The directory browser and project persistence APIs include:
 | GET | `/api/projects` | List up to five existing recent project folders in last-opened order |
 | POST | `/api/sessions` | Create a session; an existing `project_id` is required |
 | POST | `/api/sessions/{id}/open` | Open a project session; an explicit valid `project_id` can associate a legacy orphan |
-| GET | `/api/projects/{id}/preferences` | Read the project's remembered default configuration |
+| GET / PATCH | `/api/projects/{id}/preferences` | Read / save project timeout and retry policy alongside its remembered configuration |
 | GET | `/api/projects/{id}/memory` | Read the project's latest completed interaction records |
 | GET / POST / PATCH | `/api/projects/{id}/environments` | List / create / select managed Python environments |
 | GET | `/api/sessions?include_agents=true` | Include hidden read-only agent sessions for trace viewers |
@@ -327,9 +327,16 @@ and exports. If a final reply repeats an intermediate reply, it is shown once.
 Cancelled partials remain visible after reload, Save, Copy or export. Private
 provider reasoning is never displayed or recorded.
 
-**Provider response timeout** and **Timeout retries** in Connection settings
-apply to new conversations and agent tasks. Timeout accepts finite seconds from
-1 to 3,600 (default 120); retries accepts integers from 0 to 10 (default 2).
+**Provider response timeout** and **Timeout retries** appear in the named
+**Project task settings** section of Connection settings. Each project saves its
+own values in `.memory/preferences.json`, alongside its remembered model.
+Open a project or project conversation before editing them. New projects default
+to `-1` seconds and two retries. `-1` waits indefinitely for the provider and
+removes both the application deadline and HTTP client timeouts; Stop remains
+available. Any finite non-negative number of seconds is also allowed, including
+fractional values and values above 3,600. `0` times out immediately without
+sending a provider request. Other negative values are rejected. Retries accepts
+integers from 0 to 10.
 The retry count is additional attempts after a timed-out provider request: two
 retries permit at most three attempts for a timed-out turn. Low effort stops on
 the first timeout even if retries are configured. Medium, High, Extra high, and
@@ -338,9 +345,14 @@ Each retry uses the same prompt, conversation, and tool definitions; completed
 tools are not rerun. HTTP errors and malformed replies do not count as response
 timeouts. Retry status is saved with public progress and request history.
 
-Each task captures its timeout and retry settings when it starts. Subagents
+Each task captures its project's timeout and retry settings when it starts. Subagents
 inherit that snapshot and the parent's effort, so changing settings during a task
-only affects later tasks. Exhausting all attempts stops the affected task, restores
+only affects later tasks in that project. Switching projects restores the other
+project's saved values. Existing catalog projects lacking their own policy migrate
+the former valid global policy once; already saved project settings are preserved.
+Corrupt, missing, or unwritable project settings produce a visible error before
+starting a new task rather than silently using another policy.
+Exhausting all attempts stops the affected task, restores
 the main conversation's submitted draft, and retains public partial results.
 A timed-out child stays failed; its parent can inspect that result and continue
 other work. The parent cannot automatically restart the same failed child to bypass
@@ -391,7 +403,7 @@ Use absolute paths for overrides. A previously saved connection URL takes
 precedence over the initial `CONNECTOR_URL` until changed in Settings.
 
 The runner binds to loopback. This is a **single-user, single-process local
-application**, with bounded requests, four simultaneous jobs, request timeouts,
+application**, with bounded request sizes, four simultaneous jobs, project-configured response timeouts,
 host/origin checks and project-file containment. Enabled project tools execute
 Python and shell commands under the local account.
 It is not an authenticated multi-tenant service. Before public hosting, add

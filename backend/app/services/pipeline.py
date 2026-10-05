@@ -391,7 +391,7 @@ class Pipeline:
         model = requested if requested in available else parent['model']
         if model not in available:
             raise ConnectorError('Select an available configuration before running an agent')
-        child = self.session_files.new(name, parent['project_id'], persist=False)
+        child = self.session_files.new(name, parent['project_id'], {'model': model}, persist=False)
         child = self.session_files.update(child['id'], lambda current: current.update(
             is_agent=True, read_only=True, hidden=True, parent_session_id=parent['session_id'],
             agent_name=name, agent_task=task, agent_status='queued', model=model, effort=parent['effort']))

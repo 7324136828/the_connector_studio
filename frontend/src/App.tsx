@@ -115,10 +115,15 @@ export default function App() {
     font_size: 14,
     workspace_root: "",
     max_parallel_agents: 4,
-    provider_response_timeout: 120,
-    provider_timeout_retries: 2,
   });
   const [settingsDraft, setSettingsDraft] = useState(connection);
+  const [taskPolicyDraft, setTaskPolicyDraft] = useState<{
+    project_id: string;
+    provider_response_timeout: string;
+    provider_timeout_retries: string;
+    loading: boolean;
+    error: string;
+  } | null>(null);
   const [environmentState, setEnvironmentState] = useState<{
     project_id: string;
     data: ProjectEnvironments | null;
@@ -246,6 +251,13 @@ export default function App() {
   selectedEnvironmentProject.current =
     dialog === "settings" ? environmentProjectId : null;
   const environmentSequence = useRef(0);
+  const modelProjectId = useRef<string | null>(null);
+  const modelSequence = useRef(0);
+  modelProjectId.current = environmentProjectId;
+  const selectedTaskPolicy =
+    taskPolicyDraft?.project_id === environmentProjectId ? taskPolicyDraft : null;
+  const taskPolicyUnavailable = !!environmentProjectId &&
+    (!selectedTaskPolicy || selectedTaskPolicy.loading || !!selectedTaskPolicy.error);
   const selectedEnvironments =
     environmentState?.project_id === environmentProjectId
       ? environmentState
@@ -334,10 +346,17 @@ export default function App() {
     setProjects(serverProjects);
   }, []);
   const loadModels = useCallback(async () => {
+    const sequence = ++modelSequence.current;
+    const projectId = modelProjectId.current;
     try {
-      setModels(await api<Model[]>("/models"));
+      const available = await api<Model[]>(
+        "/models" + (projectId ? "?project_id=" + encodeURIComponent(projectId) : ""),
+      );
+      if (sequence !== modelSequence.current || projectId !== modelProjectId.current) return;
+      setModels(available);
       setModelError("");
     } catch (e) {
+      if (sequence !== modelSequence.current || projectId !== modelProjectId.current) return;
       setModels([]);
       setModelError(e instanceof Error ? e.message : "Models unavailable");
     }
@@ -411,7 +430,6 @@ export default function App() {
         }
       })
       .catch((e) => setError(e.message));
-    void loadModels();
     const timer = setInterval(() => {
       if (alive) void refresh().catch((e) => setError(e.message));
     }, 3000);
@@ -428,6 +446,9 @@ export default function App() {
       clearInterval(draftTimer);
     };
   }, [flush, refresh, loadModels]);
+  useEffect(() => {
+    void loadModels();
+  }, [environmentProjectId, loadModels]);
   useEffect(() => {
     if (!project) {
       setFiles([]);
@@ -583,6 +604,31 @@ export default function App() {
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const projectId = dialog === "settings" ? environmentProjectId : null;
+    if (!projectId) {
+      setTaskPolicyDraft(null);
+      return;
+    }
+    setTaskPolicyDraft({ project_id: projectId, provider_response_timeout: "-1",
+      provider_timeout_retries: "2", loading: true, error: "" });
+    void api<ProjectPreferences>("/projects/" + projectId + "/preferences")
+      .then((policy) => {
+        if (cancelled || selectedEnvironmentProject.current !== projectId) return;
+        setTaskPolicyDraft({ project_id: projectId,
+          provider_response_timeout: String(policy.provider_response_timeout ?? -1),
+          provider_timeout_retries: String(policy.provider_timeout_retries ?? 2),
+          loading: false, error: policy.error || "" });
+      })
+      .catch((problem) => {
+        if (cancelled || selectedEnvironmentProject.current !== projectId) return;
+        setTaskPolicyDraft((previous) => previous?.project_id === projectId
+          ? { ...previous, loading: false, error: problem instanceof Error ? problem.message : "Unable to load project task settings." }
+          : previous);
+      });
+    return () => { cancelled = true; };
+  }, [dialog, environmentProjectId]);
   const changeTitle = (id: string, title: string) => {
     editVersions.current.set(id, (editVersions.current.get(id) ?? 0) + 1);
     dirtyTitles.current.set(id, title);
@@ -839,8 +885,21 @@ export default function App() {
       setBusy(false);
     }
   };
+  const captureTaskPolicy = () => {
+    if (!environmentProjectId) return null;
+    if (!selectedTaskPolicy || selectedTaskPolicy.loading || selectedTaskPolicy.error)
+      throw new Error("Wait for the project's task settings to load before saving.");
+    const timeout = Number(selectedTaskPolicy.provider_response_timeout);
+    const retries = Number(selectedTaskPolicy.provider_timeout_retries);
+    if (!selectedTaskPolicy.provider_response_timeout.trim() || !Number.isFinite(timeout) || (timeout !== -1 && timeout < 0))
+      throw new Error("Use -1 for unlimited or a non-negative response timeout.");
+    if (!selectedTaskPolicy.provider_timeout_retries.trim() || !Number.isInteger(retries) || retries < 0 || retries > 10)
+      throw new Error("Use a whole number of timeout retries from 0 to 10.");
+    return { project_id: selectedTaskPolicy.project_id, provider_response_timeout: timeout, provider_timeout_retries: retries };
+  };
   const submitDialog = () =>
     guard(async () => {
+      const policy = captureTaskPolicy();
       for (const id of new Set([
         ...dirty.current.keys(),
         ...dirtyTitles.current.keys(),
@@ -850,10 +909,15 @@ export default function App() {
         server_url: settingsDraft.server_url,
         font_size: settingsDraft.font_size,
         max_parallel_agents: settingsDraft.max_parallel_agents,
-        provider_response_timeout:
-          settingsDraft.provider_response_timeout ?? 120,
-        provider_timeout_retries: settingsDraft.provider_timeout_retries ?? 2,
       });
+      if (policy) {
+        await api("/projects/" + policy.project_id + "/preferences", "PATCH", {
+          provider_response_timeout: policy.provider_response_timeout,
+          provider_timeout_retries: policy.provider_timeout_retries,
+        });
+        if (selectedProjectId.current === policy.project_id)
+          await loadProjectPreferences(policy.project_id);
+      }
       setConnection(settingsDraft);
       await loadModels();
       await refresh();
@@ -2082,48 +2146,51 @@ export default function App() {
                 />
               </label>
               <p className="muted">Limit how many agents can work at once.</p>
-              <label>
-                Provider response timeout (seconds)
-                <input
-                  type="number"
-                  min={1}
-                  max={3600}
-                  step="any"
-                  required
-                  disabled={busy}
-                  value={settingsDraft.provider_response_timeout ?? 120}
-                  onChange={(e) =>
-                    setSettingsDraft({
-                      ...settingsDraft,
-                      provider_response_timeout: Number(e.target.value),
-                    })
-                  }
-                />
-              </label>
-              <label>
-                Timeout retries
-                <input
-                  type="number"
-                  min={0}
-                  max={10}
-                  step={1}
-                  required
-                  disabled={busy}
-                  value={settingsDraft.provider_timeout_retries ?? 2}
-                  onChange={(e) =>
-                    setSettingsDraft({
-                      ...settingsDraft,
-                      provider_timeout_retries: Number(e.target.value),
-                    })
-                  }
-                />
-              </label>
-              <p className="muted">
-                Retries follow the first timed-out attempt. Low effort stops
-                immediately; Medium and higher use these retries for
-                conversations and agents. Stop interrupts requests and retries.
-                Changes apply to new tasks.
-              </p>
+              <fieldset className="environment-settings" key={environmentProjectId || "no-project"}
+                disabled={busy || !environmentProjectId || taskPolicyUnavailable}>
+                <legend>
+                  Project task settings{environmentProjectName ? ": " + environmentProjectName : ""}
+                </legend>
+                {environmentProjectId ? (
+                  <>
+                    {selectedTaskPolicy?.error && (
+                      <p className="project-memory-error" role="alert">{selectedTaskPolicy.error}</p>
+                    )}
+                    {taskPolicyUnavailable && !selectedTaskPolicy?.error && <p className="muted">Loading project task settings...</p>}
+                    <label>
+                      Provider response timeout (seconds)
+                      <input type="number" min={-1} step="any" required
+                        value={selectedTaskPolicy?.provider_response_timeout ?? "-1"}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          const seconds = Number(value);
+                          e.target.setCustomValidity(value && Number.isFinite(seconds) && (seconds === -1 || seconds >= 0)
+                            ? "" : "Use -1 for unlimited or non-negative seconds.");
+                          setTaskPolicyDraft((previous) => previous?.project_id === environmentProjectId
+                            ? { ...previous, provider_response_timeout: value } : previous);
+                        }} />
+                    </label>
+                    <label>
+                      Timeout retries
+                      <input type="number" min={0} max={10} step={1} required
+                        value={selectedTaskPolicy?.provider_timeout_retries ?? "2"}
+                        onChange={(e) => setTaskPolicyDraft((previous) => previous?.project_id === environmentProjectId
+                          ? { ...previous, provider_timeout_retries: e.target.value } : previous)} />
+                    </label>
+                    <p className="muted">
+                      -1 waits forever; 0 times out immediately. Retries follow the first timed-out attempt.
+                      Low effort stops immediately; Medium and higher use these retries for conversations and agents.
+                      Stop interrupts requests and retries. Changes apply to new tasks in this project.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="muted">Open a project to configure its response timeout and retries.</p>
+                    <label>Provider response timeout (seconds)<input type="number" value={-1} readOnly /></label>
+                    <label>Timeout retries<input type="number" value={2} readOnly /></label>
+                  </>
+                )}
+              </fieldset>
               <fieldset className="environment-settings" disabled={busy}>
                 <legend>
                   Python environments
@@ -2214,9 +2281,10 @@ export default function App() {
               <button
                 type="button"
                 className="secondary"
-                disabled={busy}
+                disabled={busy || taskPolicyUnavailable}
                 onClick={() =>
                   void guard(async () => {
+                    const policy = captureTaskPolicy();
                     const result = await api<{ models: Model[] }>(
                       "/settings/test",
                       "POST",
@@ -2225,10 +2293,8 @@ export default function App() {
                         font_size: settingsDraft.font_size,
                         max_parallel_agents:
                           settingsDraft.max_parallel_agents,
-                        provider_response_timeout:
-                          settingsDraft.provider_response_timeout ?? 120,
-                        provider_timeout_retries:
-                          settingsDraft.provider_timeout_retries ?? 2,
+                        ...(policy ? { project_id: policy.project_id,
+                          provider_response_timeout: policy.provider_response_timeout } : {}),
                       },
                     );
                     setNotice(
@@ -2248,7 +2314,7 @@ export default function App() {
                 <button type="button" onClick={() => setDialog("")}>
                   Cancel
                 </button>
-                <button className="primary" disabled={busy}>
+                <button className="primary" disabled={busy || taskPolicyUnavailable}>
                   {busy ? "Working..." : "Save"}
                 </button>
               </div>

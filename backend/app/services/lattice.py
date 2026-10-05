@@ -4,6 +4,7 @@ import math
 import re
 import struct
 from uuid import UUID
+from ..config import valid_provider_timeout
 
 MAX_FILE = 32 * 1024 * 1024
 MAX_STRING = 4 * 1024 * 1024
@@ -125,7 +126,7 @@ def _extension(value, *, child=False, messages=None):
                 raise ValueError('Invalid execution retry count')
         if 'provider_response_timeout' in state:
             timeout = state['provider_response_timeout']
-            if type(timeout) not in (int, float) or not math.isfinite(timeout) or (timeout != -1 and timeout < 0):
+            if not valid_provider_timeout(timeout):
                 raise ValueError('Invalid execution provider timeout')
         if 'error' in state and (not isinstance(state['error'], str) or len(state['error']) > 10000):
             raise ValueError('Invalid execution state error')

@@ -1,9 +1,10 @@
-"""Persisted connection timeout settings and legacy-policy normalization."""
+"""File-authoritative project timeout/retry policy and legacy migration."""
 import math
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+import json
 
 import httpx
 from fastapi.testclient import TestClient
@@ -11,7 +12,7 @@ from pydantic import ValidationError
 
 from backend.app.config import Settings
 from backend.app.main import create_app
-from backend.app.schemas.studio import ConnectionInput
+from backend.app.schemas.studio import ProjectPreferencesPatch
 from backend.app.services import lattice
 from backend.app.services.connector import ConnectorTimeout
 
@@ -36,123 +37,209 @@ class ProviderSettingsTests(unittest.TestCase):
             self.app.state.pipeline.temp.purge(path)
         self.directory.cleanup()
 
-    def restart(self):
+    def restart(self, data_dir=None):
         self.context.__exit__(None, None, None)
+        if data_dir:
+            self.settings = Settings(data_dir=data_dir, workspace_root=self.settings.workspace_root, browser_roots=[self.root])
         self.app = create_app(self.settings, self.transport)
         self.context = TestClient(self.app)
         self.client = self.context.__enter__()
 
-    def test_new_defaults_are_persisted_and_saved_fractional_policy_survives_restart(self):
-        current = self.client.get('/api/settings').json()
-        self.assertEqual(current['provider_response_timeout'], 120)
-        self.assertEqual(current['provider_timeout_retries'], 2)
-        stored = self.app.state.store.get('settings', 'connection')
-        self.assertEqual(stored['provider_response_timeout'], 120)
-        self.assertEqual(stored['provider_timeout_retries'], 2)
-        saved = self.client.post('/api/settings', json={'server_url': 'http://127.0.0.1:8301', 'font_size': 17, 'max_parallel_agents': 6, 'provider_response_timeout': 1.5, 'provider_timeout_retries': 10})
-        self.assertEqual(saved.status_code, 200, saved.text)
-        self.restart()
-        restored = self.client.get('/api/settings').json()
-        self.assertEqual(restored['provider_response_timeout'], 1.5)
-        self.assertEqual(restored['provider_timeout_retries'], 10)
-        self.assertEqual(restored['font_size'], 17)
-        self.assertEqual(restored['max_parallel_agents'], 6)
-        boundary = self.client.post('/api/settings', json={'server_url': restored['server_url'], 'provider_response_timeout': 3600, 'provider_timeout_retries': 0})
-        self.assertEqual(boundary.status_code, 200, boundary.text)
-        self.assertEqual(boundary.json()['provider_timeout_retries'], 0)
+    def project(self, name='Provider policy project'):
+        response = self.client.post('/api/projects', json={'name': name})
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()
 
-    def test_legacy_missing_or_invalid_policy_is_normalized_without_changing_other_connection_fields(self):
-        legacy = {'id': 'connection', 'server_url': 'http://localhost:8301/v1', 'font_size': 18, 'max_parallel_agents': 7, 'legacy_metadata': 'retained'}
-        self.app.state.store.put('settings', legacy)
-        self.restart()
-        normalized = self.client.get('/api/settings').json()
-        self.assertEqual(normalized['provider_response_timeout'], 120)
-        self.assertEqual(normalized['provider_timeout_retries'], 2)
-        for key, value in legacy.items():
-            self.assertEqual(normalized[key], value)
-        self.app.state.store.put('settings', {**legacy, 'provider_response_timeout': False, 'provider_timeout_retries': 2.5})
-        normalized = self.client.get('/api/settings').json()
-        self.assertEqual(normalized['provider_response_timeout'], 120)
-        self.assertEqual(normalized['provider_timeout_retries'], 2)
-        stored = self.app.state.store.get('settings', 'connection')
-        self.assertEqual(stored['provider_response_timeout'], 120)
-        self.assertEqual(stored['provider_timeout_retries'], 2)
-        self.assertEqual(stored['legacy_metadata'], 'retained')
+    def preferences(self, project):
+        return self.client.get('/api/projects/' + project['id'] + '/preferences').json()
 
-    def test_save_and_test_validate_numeric_timeout_and_strict_integer_retries_before_any_request(self):
-        before = self.app.state.store.get('settings', 'connection')
-        invalid = [('provider_response_timeout', value) for value in (0, 3601, 10 ** 400, True, '120', None)]
+    def set_policy(self, project, **fields):
+        response = self.client.patch('/api/projects/' + project['id'] + '/preferences', json=fields)
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_unlimited_defaults_are_project_scoped_and_custom_policy_survives_restart_and_portable_reopen(self):
+        project, other = self.project(), self.project('Independent policy project')
+        self.assertEqual(self.preferences(project)['provider_response_timeout'], -1)
+        self.assertEqual(self.preferences(project)['provider_timeout_retries'], 2)
+        self.set_policy(project, provider_response_timeout=100000.5, provider_timeout_retries=10)
+        self.app.state.project_memory.set_default_model(project['id'], 'test-config')
+        file = Path(project['path']) / '.memory/preferences.json'
+        saved = json.loads(file.read_text(encoding='utf-8'))
+        self.assertEqual(saved['provider_response_timeout'], 100000.5)
+        self.assertEqual(saved['default_model'], 'test-config')
+        self.assertEqual(self.preferences(other)['provider_response_timeout'], -1)
+        self.restart()
+        self.assertEqual(self.preferences(project)['provider_response_timeout'], 100000.5)
+        self.restart(self.root / 'portable-data')
+        reopened = self.client.post('/api/projects/open', json={'path': project['path']}).json()
+        self.assertEqual(self.preferences(reopened)['provider_timeout_retries'], 10)
+        self.assertEqual(self.preferences(reopened)['provider_response_timeout'], 100000.5)
+        self.assertEqual(self.preferences(reopened)['default_model'], 'test-config')
+        self.assertEqual(json.loads(file.read_text(encoding='utf-8')), saved)
+
+    def test_partial_policy_updates_preserve_model_and_other_policy_fields(self):
+        project = self.project()
+        memory = self.app.state.project_memory
+        memory.set_default_model(project['id'], 'test-config')
+        self.set_policy(project, provider_response_timeout=0, provider_timeout_retries=7)
+        timeout = self.set_policy(project, provider_response_timeout=0.125)
+        self.assertEqual(timeout['provider_timeout_retries'], 7)
+        self.assertEqual(timeout['default_model'], 'test-config')
+        retries = self.set_policy(project, provider_timeout_retries=0)
+        self.assertEqual(retries['provider_response_timeout'], 0.125)
+        memory.set_default_model(project['id'], 'test-config-alt')
+        current = self.preferences(project)
+        self.assertEqual(current['default_model'], 'test-config-alt')
+        self.assertEqual(current['provider_timeout_retries'], 0)
+        self.assertEqual(current['provider_response_timeout'], 0.125)
+        self.assertEqual(self.set_policy(project, provider_response_timeout=-1)['provider_response_timeout'], -1)
+
+    def test_existing_catalog_migrates_former_global_policy_once_without_overwriting_project_fields(self):
+        legacy, custom = self.project(), self.project('Custom existing policy')
+        self.set_policy(custom, provider_response_timeout=0.5, provider_timeout_retries=9)
+        for project in (legacy, custom):
+            self.app.state.store.update('project', project['id'], lambda current: current.pop('provider_policy_initialized', None))
+        legacy_file = Path(legacy['path']) / '.memory/preferences.json'
+        legacy_file.write_text(json.dumps({'version': 1, 'default_model': 'test-config'}), encoding='utf-8')
+        connection = self.app.state.store.get('settings', 'connection')
+        self.app.state.store.put('settings', {**connection, 'provider_response_timeout': 45.5, 'provider_timeout_retries': 4})
+        with self.app.state.store.connection() as db:
+            db.execute('DELETE FROM documents WHERE kind=? AND id=?', ('settings', 'project_provider_policy_migration'))
+        self.restart()
+        self.assertEqual(self.preferences(legacy)['provider_response_timeout'], 45.5)
+        self.assertEqual(self.preferences(legacy)['provider_timeout_retries'], 4)
+        self.assertEqual(self.preferences(legacy)['default_model'], 'test-config')
+        self.assertEqual(self.preferences(custom)['provider_response_timeout'], 0.5)
+        self.assertEqual(self.preferences(custom)['provider_timeout_retries'], 9)
+        self.assertEqual(self.preferences(self.project('New after migration'))['provider_response_timeout'], -1)
+        self.client.post('/api/settings', json={'server_url': connection['server_url'], 'font_size': 17}).raise_for_status()
+        self.restart()
+        self.assertEqual(self.preferences(legacy)['provider_response_timeout'], 45.5)
+        self.assertEqual(self.preferences(custom)['provider_response_timeout'], 0.5)
+
+    def test_unavailable_legacy_project_keeps_migration_policy_after_global_settings_are_saved(self):
+        project = self.project('Temporarily unavailable legacy project')
+        folder = Path(project['path'])
+        moved = self.root / 'Moved legacy folder'
+        self.assertTrue(folder.resolve().is_relative_to(self.root))
+        self.assertTrue(moved.resolve().is_relative_to(self.root))
+        self.app.state.store.update('project', project['id'], lambda current: current.pop('provider_policy_initialized', None))
+        (folder / '.memory/preferences.json').write_text(json.dumps({'version': 1, 'default_model': 'test-config'}), encoding='utf-8')
+        connection = self.app.state.store.get('settings', 'connection')
+        self.app.state.store.put('settings', {**connection, 'provider_response_timeout': 75, 'provider_timeout_retries': 6})
+        with self.app.state.store.connection() as db:
+            db.execute('DELETE FROM documents WHERE kind=? AND id=?', ('settings', 'project_provider_policy_migration'))
+        folder.rename(moved)
+        self.restart()
+        self.client.post('/api/settings', json={'server_url': connection['server_url'], 'font_size': 16}).raise_for_status()
+        moved.rename(folder)
+        response = self.client.post('/api/projects/open', json={'path': project['path']})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.preferences(project)['provider_response_timeout'], 75)
+        self.assertEqual(self.preferences(project)['provider_timeout_retries'], 6)
+        self.assertEqual(self.preferences(project)['default_model'], 'test-config')
+
+    def test_policy_validation_rejects_other_negatives_non_finite_and_non_integer_retries_without_overwrite(self):
+        project = self.project()
+        file = Path(project['path']) / '.memory/preferences.json'
+        before = file.read_bytes()
+        invalid = [('provider_response_timeout', value) for value in (-2, -0.01, 10 ** 400, True, '120', None)]
         invalid += [('provider_timeout_retries', value) for value in (-1, 11, True, 1.5, '2', None)]
-        with patch.object(self.app.state.connector, 'models', new=AsyncMock()) as models:
-            for key, value in invalid:
-                for endpoint in ('/api/settings', '/api/settings/test'):
-                    with self.subTest(endpoint=endpoint, key=key, value=value):
-                        response = self.client.post(endpoint, json={'server_url': before['server_url'], key: value})
-                        self.assertEqual(response.status_code, 422, response.text)
-            for value in ('NaN', 'Infinity', '-Infinity'):
-                for endpoint in ('/api/settings', '/api/settings/test'):
-                    response = self.client.post(endpoint, content='{"server_url":"http://127.0.0.1:8301","provider_response_timeout":' + value + '}', headers={'Content-Type': 'application/json'})
-                    self.assertEqual(response.status_code, 422, response.text)
-            models.assert_not_awaited()
-        self.assertEqual(self.app.state.store.get('settings', 'connection'), before)
-        for value in (float('nan'), float('inf'), -float('inf')):
-            with self.subTest(value=value):
-                with self.assertRaises(ValidationError):
-                    ConnectionInput(server_url=before['server_url'], provider_response_timeout=value)
+        for key, value in invalid:
+            with self.subTest(key=key, value=value):
+                response = self.client.patch('/api/projects/' + project['id'] + '/preferences', json={key: value})
+                self.assertEqual(response.status_code, 422, response.text)
+        for value in ('NaN', 'Infinity', '-Infinity'):
+            response = self.client.patch('/api/projects/' + project['id'] + '/preferences', content='{"provider_response_timeout":' + value + '}', headers={'Content-Type': 'application/json'})
+            self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(file.read_bytes(), before)
+        for value in (math.nan, math.inf, -math.inf):
+            with self.assertRaises(ValidationError):
+                ProjectPreferencesPatch(provider_response_timeout=value)
 
-    def test_model_discovery_uses_saved_timeout_and_test_uses_unsaved_timeout_without_persisting(self):
-        self.client.post('/api/settings', json={'server_url': 'http://127.0.0.1:8301', 'provider_response_timeout': 12.5, 'provider_timeout_retries': 4}).raise_for_status()
-        before = self.app.state.store.get('settings', 'connection')
-        with patch.object(self.app.state.connector, 'models', new=AsyncMock(return_value=[{'id': 'test-config', 'name': 'Test'}])) as models:
-            response = self.client.get('/api/models')
-            self.assertEqual(response.status_code, 200, response.text)
-            models.assert_awaited_once_with(before['server_url'], response_timeout=12.5)
+    def test_discovery_uses_project_policy_and_test_uses_unsaved_override_without_persisting(self):
+        project = self.project()
+        self.set_policy(project, provider_response_timeout=12.5, provider_timeout_retries=4)
+        file = Path(project['path']) / '.memory/preferences.json'
+        before = file.read_bytes()
+        with patch.object(self.app.state.connector, 'models', new=AsyncMock(return_value=[])) as models:
+            self.client.get('/api/models', params={'project_id': project['id']}).raise_for_status()
+            models.assert_awaited_once_with('http://127.0.0.1:8301/v1', response_timeout=12.5)
             models.reset_mock()
-            response = self.client.post('/api/settings/test', json={'server_url': 'http://localhost:9000', 'provider_response_timeout': 2.75, 'provider_timeout_retries': 9})
-            self.assertEqual(response.status_code, 200, response.text)
-            models.assert_awaited_once_with('http://localhost:9000/v1', response_timeout=2.75)
-        self.assertEqual(self.app.state.store.get('settings', 'connection'), before)
+            self.client.get('/api/models').raise_for_status()
+            models.assert_awaited_once_with('http://127.0.0.1:8301/v1', response_timeout=-1)
+            models.reset_mock()
+            self.client.post('/api/settings/test', json={'server_url': 'http://localhost:9000', 'project_id': project['id'], 'provider_response_timeout': -1}).raise_for_status()
+            models.assert_awaited_once_with('http://localhost:9000/v1', response_timeout=-1)
+            models.reset_mock()
+            self.client.post('/api/settings/test', json={'server_url': 'http://localhost:9000', 'project_id': project['id']}).raise_for_status()
+            models.assert_awaited_once_with('http://localhost:9000/v1', response_timeout=12.5)
+        self.assertEqual(file.read_bytes(), before)
+        self.assertNotIn('provider_response_timeout', self.client.get('/api/settings').json())
+        self.assertEqual(self.client.post('/api/settings', json={'server_url': 'http://localhost:8301', 'provider_response_timeout': 5}).status_code, 422)
 
-    def test_connector_discovery_applies_saved_and_unsaved_timeouts_once_without_retrying(self):
-        self.client.post('/api/settings', json={'server_url': 'http://127.0.0.1:8301', 'provider_response_timeout': 12.5, 'provider_timeout_retries': 4}).raise_for_status()
+    def test_connector_discovery_applies_unlimited_and_custom_timeouts_once_without_retries(self):
         self.client.get('/api/models').raise_for_status()
         self.assertEqual(len(self.requests), 1)
-        self.assertEqual(self.requests[0].extensions['timeout']['read'], 12.5)
-        self.client.post('/api/settings/test', json={'server_url': 'http://localhost:9000', 'provider_response_timeout': 2.75, 'provider_timeout_retries': 9}).raise_for_status()
+        self.assertTrue(all(value is None for value in self.requests[0].extensions['timeout'].values()))
+        project = self.project()
+        self.set_policy(project, provider_response_timeout=7200)
+        self.client.get('/api/models', params={'project_id': project['id']}).raise_for_status()
         self.assertEqual(len(self.requests), 2)
-        self.assertEqual(self.requests[1].extensions['timeout']['read'], 2.75)
-        self.assertEqual(str(self.requests[1].url), 'http://localhost:9000/v1/models')
-        self.assertEqual(self.client.get('/api/settings').json()['provider_response_timeout'], 12.5)
-
-    def test_provider_discovery_errors_return_controlled_502_and_policy_change_does_not_cancel_existing_work(self):
+        self.assertEqual(self.requests[1].extensions['timeout']['read'], 7200)
         with patch.object(self.app.state.connector, 'models', new=AsyncMock(side_effect=ConnectorTimeout('Connector request timed out.'))):
             self.assertEqual(self.client.get('/api/models').status_code, 502)
-            self.assertEqual(self.client.post('/api/settings/test', json={'server_url': 'http://127.0.0.1:8301', 'provider_response_timeout': 1}).status_code, 502)
-        pipeline = self.app.state.pipeline
-        with patch.object(pipeline, 'tasks', {'active-fixture': None}), patch.object(pipeline, 'discard', new=AsyncMock()) as discard:
-            response = self.client.post('/api/settings', json={'server_url': 'http://127.0.0.1:8301', 'provider_response_timeout': 60, 'provider_timeout_retries': 5})
-            self.assertEqual(response.status_code, 200, response.text)
-            discard.assert_not_awaited()
-        self.assertEqual(self.client.get('/api/settings').json()['provider_timeout_retries'], 5)
+            self.assertEqual(self.client.post('/api/settings/test', json={'server_url': 'http://localhost:8301', 'project_id': project['id']}).status_code, 502)
+
+    def test_missing_corrupt_or_unwritable_preferences_block_tasks_before_job_allocation(self):
+        project = self.project()
+        session = self.client.post('/api/sessions', json={'title': 'Guarded task', 'project_id': project['id']}).json()
+        file = Path(project['path']) / '.memory/preferences.json'
+        original = file.read_bytes()
+        url = '/api/sessions/' + session['id'] + '/messages'
+        before_temp = set(self.app.state.pipeline.temp.root.glob('job-*'))
+        for invalid in (None, b'corrupt preferences', b'{"version":1,"default_model":"test-config"}'):
+            if invalid is None:
+                file.unlink()
+            else:
+                file.write_bytes(invalid)
+            response = self.client.post(url, json={'text': 'Task must not start', 'model': 'test-config'})
+            self.assertIn(response.status_code, (409, 422), response.text)
+            self.assertEqual(self.app.state.store.list('job'), [])
+            self.assertEqual(set(self.app.state.pipeline.temp.root.glob('job-*')), before_temp)
+            self.assertIsNone(self.app.state.store.get('session', session['id'])['pending_job'])
+            self.assertEqual(self.app.state.store.get('session', session['id'])['messages'], [])
+            file.write_bytes(original)
+        with patch('backend.app.services.project_memory.atomic_write', side_effect=PermissionError('Fixture denied preferences write')):
+            response = self.client.post(url, json={'text': 'Unwritable task', 'model': 'test-config'})
+            self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.app.state.store.list('job'), [])
+        self.assertEqual(file.read_bytes(), original)
+        file.unlink()
+        self.restart()
+        self.assertFalse(file.exists(), 'Initialized missing preference files must not silently recreate on restart')
+        self.assertTrue(self.preferences(project)['error'])
+        self.client.post('/api/projects/open', json={'path': project['path']}).raise_for_status()
+        self.assertFalse(file.exists(), 'Reopening an initialized project must preserve a missing preference file')
 
     def test_opened_retrying_native_snapshot_is_cancelled_with_public_retry_details_preserved(self):
-        project = self.client.post('/api/projects', json={'name': 'Retry snapshot project'}).json()
-        state = {'phase': 'retrying', 'iteration': 2, 'retry_attempt': 1, 'retry_limit': 3, 'provider_response_timeout': 1.5}
+        project = self.project()
+        state = {'phase': 'retrying', 'iteration': 2, 'retry_attempt': 1, 'retry_limit': 3, 'provider_response_timeout': -1}
         source = Path(project['path']) / 'files' / 'retrying.lattice'
         source.write_bytes(lattice.encode({'title': 'Retrying snapshot', 'messages': [], 'execution_state': state}))
         response = self.client.post('/api/projects/' + project['id'] + '/sessions/open', json={'path': 'files/retrying.lattice'})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()['execution_state'], {**state, 'phase': 'cancelled'})
-        saved = lattice.decode(Path(response.json()['saved_path']).read_bytes())
-        self.assertEqual(saved['execution_state'], {**state, 'phase': 'cancelled'})
 
 
 class ProviderPolicyConfigTests(unittest.TestCase):
-    def test_config_defaults_and_invalid_runtime_defaults_are_bounded(self):
+    def test_runtime_defaults_accept_unlimited_zero_and_uncapped_finite_seconds(self):
         with tempfile.TemporaryDirectory(prefix='studio-provider-config-test-') as directory:
-            settings = Settings(data_dir=Path(directory), provider_response_timeout=4.5, provider_timeout_retries=3)
-            self.assertEqual(settings.provider_policy({'provider_response_timeout': 'invalid', 'provider_timeout_retries': True}), {'provider_response_timeout': 4.5, 'provider_timeout_retries': 3})
-            for kwargs in ({'provider_response_timeout': 0}, {'provider_response_timeout': 3601}, {'provider_response_timeout': 10 ** 400}, {'provider_response_timeout': math.inf}, {'provider_response_timeout': True}, {'provider_timeout_retries': -1}, {'provider_timeout_retries': 11}, {'provider_timeout_retries': False}, {'provider_timeout_retries': 1.5}):
+            for timeout in (-1, 0, 0.125, 7200, 1e100):
+                settings = Settings(data_dir=Path(directory), provider_response_timeout=timeout, provider_timeout_retries=3)
+                self.assertEqual(settings.provider_policy()['provider_response_timeout'], timeout)
+            for kwargs in ({'provider_response_timeout': -2}, {'provider_response_timeout': -0.1}, {'provider_response_timeout': 10 ** 400}, {'provider_response_timeout': math.inf}, {'provider_response_timeout': True}, {'provider_timeout_retries': -1}, {'provider_timeout_retries': 11}, {'provider_timeout_retries': False}, {'provider_timeout_retries': 1.5}):
                 with self.subTest(kwargs=kwargs):
                     with self.assertRaises(ValueError):
                         Settings(data_dir=Path(directory), **kwargs)

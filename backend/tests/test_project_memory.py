@@ -104,7 +104,11 @@ class ProjectMemoryTests(unittest.TestCase):
         other = self.project('Independent project')
         session = self.session(project)
         self.assertEqual(session['model'], '')
+        self.client.patch('/api/projects/' + project['id'] + '/preferences', json={'provider_response_timeout': 0.75, 'provider_timeout_retries': 8}).raise_for_status()
         self.select(session, 'test-config-alt')
+        self.assertEqual(self.preferences(project)['provider_response_timeout'], 0.75)
+        self.assertEqual(self.preferences(project)['provider_timeout_retries'], 8)
+        self.assertEqual(self.preferences(other)['provider_response_timeout'], -1)
         self.assertEqual(self.preferences(project)['default_model'], 'test-config-alt')
         preference_file = Path(project['path']) / '.memory/preferences.json'
         self.assertEqual(json.loads(preference_file.read_text(encoding='utf-8'))['default_model'], 'test-config-alt')
@@ -122,6 +126,8 @@ class ProjectMemoryTests(unittest.TestCase):
         reopened = self.client.post('/api/projects/open', json={'path': project['path']})
         self.assertEqual(reopened.status_code, 200, reopened.text)
         self.assertEqual(self.preferences(reopened.json())['default_model'], 'test-config-alt')
+        self.assertEqual(self.preferences(reopened.json())['provider_response_timeout'], 0.75)
+        self.assertEqual(self.preferences(reopened.json())['provider_timeout_retries'], 8)
         self.assertEqual(self.session(reopened.json())['model'], 'test-config-alt')
 
     def test_send_updates_its_associated_project_default_and_retired_choice_is_retained(self):

@@ -182,7 +182,7 @@ test("an unavailable remembered configuration remains visible until the user cho
       })
     ).status(),
   ).toBe(200);
-  await page.route("**/api/models", (route) =>
+  await page.route(/\/api\/models(?:\?.*)?$/, (route) =>
     route.fulfill({
       json: [{ id: "test-config", name: "Test configuration" }],
     }),
